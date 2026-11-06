@@ -1,0 +1,6 @@
+{
+  "name": "Roam & Rest: Lo-Fi 4x4 Expedition",
+  "description": "A cozy, lo-fi low-poly off-road driving diorama with procedural biomes, realistic surface physics, dynamic weather, and ambient life.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
