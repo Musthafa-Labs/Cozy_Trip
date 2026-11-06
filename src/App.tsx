@@ -119,11 +119,14 @@ export default function App() {
     if (controls) {
       controls.target.copy(followTarget);
       if (cameraRef.current) {
-        // Reset to default third-person view: behind vehicle (-Z), elevated (+Y)
+        // Reset to default third-person view: behind vehicle, elevated (+Y)
+        const heading = targetStation.headingRad;
+        const behindX = followTarget.x - Math.sin(heading) * 7.5;
+        const behindZ = followTarget.z - Math.cos(heading) * 7.5;
         cameraRef.current.position.set(
-          followTarget.x,
+          behindX,
           followTarget.y + 1.95,
-          followTarget.z - 7.5
+          behindZ
         );
       }
       controls.update();
@@ -490,14 +493,18 @@ export default function App() {
         // =====================================================================
         // Rule F: Chassis 12-Point Ground Contacts & Safety-Net Correction
         // Called exactly once per fixed physics step:
-        // After suspension.update() and before rigidBody.integrate()
-        // =====================================================================
-        chassisContact.update(rigidBody, testGround, dt);
+        chassisContact.update(rigidBody, testGround, dt, suspension, wheelsDyn);
 
         // =====================================================================
         // H. Rigid Body Symplectic Integration
         // =====================================================================
         rigidBody.integrate(dt);
+
+        // =====================================================================
+        // Fix G: Post-Integration Boundary Enforcement (Zero Residual Penetration)
+        // Eliminates residual velocity step into obstacle and aligns wheels
+        // =====================================================================
+        chassisContact.postIntegrate(rigidBody, testGround, suspension, wheelsDyn);
 
         // Store new current state after physics step
         currBodyPos.current.copy(rigidBody.position);
@@ -753,7 +760,7 @@ export default function App() {
         <div className="pointer-events-auto absolute top-16 right-4 z-50 rounded-xl border border-stone-300/85 bg-stone-50/95 p-3.5 shadow-lg backdrop-blur-md w-72 transition-all">
           <div className="flex items-center justify-between border-b border-stone-200 pb-1.5">
             <h3 className="text-xs font-bold uppercase tracking-wider text-stone-700">Chassis Hull Contacts</h3>
-            <span className="text-[10px] font-bold text-emerald-700 font-mono">12 POINTS</span>
+            <span className="text-[10px] font-bold text-emerald-700 font-mono">HULL & WHEELS</span>
           </div>
 
           <div className="mt-2.5 space-y-1.5 text-xs">

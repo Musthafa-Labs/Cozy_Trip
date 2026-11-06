@@ -170,16 +170,16 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
         <div className="pointer-events-auto rounded-xl border border-stone-300/80 bg-stone-50/95 p-3.5 shadow-md backdrop-blur-md transition-all sm:max-w-md">
           <div className="flex items-center justify-between gap-2 border-b border-stone-200 pb-2">
             <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">
-              Straight Test Road • 5.0 km
+              {telemetry.currentStation?.zone ?? 'Arena'} • Station {telemetry.stationIndex + 1}/{telemetry.totalStations}
             </span>
             <div className="flex items-center gap-1.5">
               <span className="inline-block h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
               <span className="text-[11px] font-semibold text-stone-600">120 Hz Pacejka MF</span>
             </div>
           </div>
-          <h2 className="mt-1.5 text-base font-semibold text-stone-900">High-Speed Straight Test Track</h2>
+          <h2 className="mt-1.5 text-base font-semibold text-stone-900">{telemetry.currentStation?.name ?? 'Test Arena'}</h2>
           <p className="mt-0.5 text-xs text-stone-600 leading-snug">
-            Long, flat asphalt road with painted boundary lines & distance markers. Free-orbit camera follows vehicle.
+            {telemetry.currentStation?.description ?? ''}
           </p>
 
           <div className="mt-3 flex flex-wrap gap-1.5">
@@ -187,7 +187,13 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
               onClick={onReset}
               className="rounded-lg bg-stone-900 px-3 py-1 text-xs font-medium text-stone-100 shadow hover:bg-stone-800 active:scale-95 transition-all"
             >
-              Reset to Start [R]
+              Reset [R]
+            </button>
+            <button
+              onClick={onNextStation}
+              className="rounded-lg border border-emerald-600 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-900 shadow-sm hover:bg-emerald-100 active:scale-95 transition-all"
+            >
+              Next Zone [T]
             </button>
             <button
               onClick={onApplyPush}
@@ -661,6 +667,9 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
           <span className="rounded bg-stone-200/80 px-2 py-0.5 font-mono text-[11px] text-stone-800">
             [R] Reset
           </span>
+          <span className="rounded bg-emerald-100 px-2 py-0.5 font-mono text-[11px] text-emerald-800 font-semibold border border-emerald-300">
+            [T] Next Zone
+          </span>
           <span className="rounded bg-stone-200/80 px-2 py-0.5 font-mono text-[11px] text-stone-800">
             [F3] HUD
           </span>
@@ -668,7 +677,7 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
             Mouse Drag: Free Orbit & Zoom
           </span>
         </div>
-        <div className="text-[11px] text-stone-400">Step 4A • Straight Track & Free-Orbit Follow Camera</div>
+        <div className="text-[11px] text-stone-400">Solid Cube Collision Test Arena • One Road, One Cube</div>
       </div>
     </div>
   );
