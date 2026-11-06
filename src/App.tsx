@@ -14,6 +14,7 @@ import { Engine } from './vehicle/engine';
 import { Drivetrain } from './vehicle/drivetrain';
 import { BrakeSystem } from './vehicle/brakes';
 import { Aerodynamics } from './vehicle/aero';
+import { ChassisContactSystem } from './vehicle/chassisContact';
 import { TestGround, TestStation } from './world/testGround';
 import { VehicleVisualModel } from './vehicle/vehicleModel';
 import { DebugVisualizer } from './render/DebugVisualizer';
@@ -28,6 +29,11 @@ export default function App() {
   // UI state
   const [debugVisible, setDebugVisible] = useState<boolean>(true);
   const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
+  const [chassisDebug, setChassisDebug] = useState({
+    contacts: 0,
+    maxPenetrationCm: 0,
+    safetyNetCorrections: 0,
+  });
 
   // Live simulation references
   const rigidBodyRef = useRef<RigidBody | null>(null);
@@ -38,6 +44,7 @@ export default function App() {
   const drivetrainRef = useRef<Drivetrain | null>(null);
   const brakesRef = useRef<BrakeSystem | null>(null);
   const aeroRef = useRef<Aerodynamics | null>(null);
+  const chassisContactRef = useRef<ChassisContactSystem | null>(null);
   const groundRef = useRef<TestGround | null>(null);
   const visualModelRef = useRef<VehicleVisualModel | null>(null);
   const debugVisRef = useRef<DebugVisualizer | null>(null);
@@ -77,6 +84,7 @@ export default function App() {
     const drivetrain = drivetrainRef.current;
     const brakes = brakesRef.current;
     const aero = aeroRef.current;
+    const chassis = chassisContactRef.current;
     if (!ground || !body || !susp) return;
 
     stationIndexRef.current = ((index % ground.stations.length) + ground.stations.length) % ground.stations.length;
@@ -88,6 +96,7 @@ export default function App() {
     if (drivetrain) drivetrain.reset();
     if (brakes) brakes.reset();
     if (aero) aero.reset();
+    if (chassis) chassis.reset();
 
     // Sync previous and current interpolation history to prevent jump on reset
     prevBodyPos.current.copy(body.position);
@@ -133,6 +142,57 @@ export default function App() {
     const pushForce = new THREE.Vector3(14000, 0, 0); // 14 kN lateral impulse
     const pushPoint = body.position.clone().add(new THREE.Vector3(0, 0.4, 0));
     body.applyForceAtWorldPoint(pushForce, pushPoint);
+  };
+
+  // Rule E: Test Hook J — Rollover / Inverted test pose
+  const applyRolloverPose = () => {
+    const body = rigidBodyRef.current;
+    if (!body) return;
+
+    // 1. Reset linear and angular velocities before applying the test pose
+    body.linearVelocity.set(0, 0, 0);
+    body.angularVelocity.set(0, 0, 0);
+
+    // 2. Clear accumulated forces and torques
+    body.clearAccumulators();
+
+    // 3. Set requested test position and orientation (upside down resting on roof)
+    body.position.set(body.position.x, 1.45, body.position.z);
+    body.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI);
+
+    // 4. Synchronize previous/current render interpolation states after changing the pose
+    prevBodyPos.current.copy(body.position);
+    currBodyPos.current.copy(body.position);
+    prevBodyQuat.current.copy(body.quaternion);
+    currBodyQuat.current.copy(body.quaternion);
+
+    // 5. Released into normal physics immediately afterward
+  };
+
+  // Rule E: Test Hook K — Extreme penetration / Safety-net test pose
+  const applySafetyNetTestPose = () => {
+    const body = rigidBodyRef.current;
+    if (!body) return;
+
+    // 1. Reset linear and angular velocities before applying the test pose
+    body.linearVelocity.set(0, 0, 0);
+    body.angularVelocity.set(0, 0, 0);
+
+    // 2. Clear accumulated forces and torques
+    body.clearAccumulators();
+
+    // 3. Set requested test position and orientation (penetration > 0.5m)
+    // Floor pan contact points at y = -0.15; position.y = -0.45 brings points to -0.60m => penetration 0.60m > 0.5m
+    body.position.set(body.position.x, -0.45, body.position.z);
+    body.quaternion.identity();
+
+    // 4. Synchronize previous/current render interpolation states after changing the pose
+    prevBodyPos.current.copy(body.position);
+    currBodyPos.current.copy(body.position);
+    prevBodyQuat.current.copy(body.quaternion);
+    currBodyQuat.current.copy(body.quaternion);
+
+    // 5. Released into normal physics immediately afterward
   };
 
   // Toggle Drivetrain Layout (AWD -> RWD -> FWD)
@@ -267,6 +327,9 @@ export default function App() {
 
     const aero = new Aerodynamics();
     aeroRef.current = aero;
+
+    const chassisContact = new ChassisContactSystem();
+    chassisContactRef.current = chassisContact;
 
     const visualModel = new VehicleVisualModel();
     scene.add(visualModel.group);
@@ -425,6 +488,13 @@ export default function App() {
         }
 
         // =====================================================================
+        // Rule F: Chassis 12-Point Ground Contacts & Safety-Net Correction
+        // Called exactly once per fixed physics step:
+        // After suspension.update() and before rigidBody.integrate()
+        // =====================================================================
+        chassisContact.update(rigidBody, testGround, dt);
+
+        // =====================================================================
         // H. Rigid Body Symplectic Integration
         // =====================================================================
         rigidBody.integrate(dt);
@@ -449,6 +519,12 @@ export default function App() {
         }
         if (input.wasJustPressed('p')) {
           applySidewaysPush();
+        }
+        if (input.wasJustPressed('j')) {
+          applyRolloverPose();
+        }
+        if (input.wasJustPressed('k')) {
+          applySafetyNetTestPose();
         }
         if (input.wasJustPressed('f3')) {
           setDebugVisible((prev) => !prev);
@@ -610,6 +686,13 @@ export default function App() {
             aeroDragN: aero.dragForceMagnitude,
             aeroDownforceN: aero.downforceMagnitude,
           });
+
+          // Rule D: Chassis contacts telemetry
+          setChassisDebug({
+            contacts: chassisContact.penetratingContactCount,
+            maxPenetrationCm: chassisContact.maxPenetrationMeters > 0 ? chassisContact.maxPenetrationMeters * 100 : 0,
+            safetyNetCorrections: chassisContact.safetyNetCounter,
+          });
         }
 
         input.endFrame();
@@ -644,6 +727,7 @@ export default function App() {
     <div className="relative w-screen h-screen overflow-hidden bg-stone-900 select-none">
       <div ref={mountRef} className="absolute inset-0 w-full h-full" />
 
+      {/* Main Debug Overlay (F3) */}
       <DebugOverlay
         visible={debugVisible}
         onToggleVisible={() => {
@@ -663,6 +747,56 @@ export default function App() {
         onShiftUp={manualShiftUp}
         onShiftDown={manualShiftDown}
       />
+
+      {/* Rule D: Dedicated F3 Chassis Contact & Safety-Net HUD */}
+      {debugVisible && (
+        <div className="pointer-events-auto absolute top-16 right-4 z-50 rounded-xl border border-stone-300/85 bg-stone-50/95 p-3.5 shadow-lg backdrop-blur-md w-72 transition-all">
+          <div className="flex items-center justify-between border-b border-stone-200 pb-1.5">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-stone-700">Chassis Hull Contacts</h3>
+            <span className="text-[10px] font-bold text-emerald-700 font-mono">12 POINTS</span>
+          </div>
+
+          <div className="mt-2.5 space-y-1.5 text-xs">
+            <div className="flex items-center justify-between rounded-lg bg-white/90 p-2 border border-stone-200">
+              <span className="text-[11px] text-stone-600 font-medium">Chassis contacts:</span>
+              <b className={`font-mono text-xs ${chassisDebug.contacts > 0 ? 'text-amber-600 font-bold' : 'text-stone-800'}`}>
+                {chassisDebug.contacts}
+              </b>
+            </div>
+
+            <div className="flex items-center justify-between rounded-lg bg-white/90 p-2 border border-stone-200">
+              <span className="text-[11px] text-stone-600 font-medium">Maximum penetration:</span>
+              <b className={`font-mono text-xs ${chassisDebug.maxPenetrationCm > 0 ? 'text-red-600 font-bold' : 'text-stone-800'}`}>
+                {chassisDebug.maxPenetrationCm > 0 ? `${chassisDebug.maxPenetrationCm.toFixed(1)} cm` : '0 cm'}
+              </b>
+            </div>
+
+            <div className="flex items-center justify-between rounded-lg bg-white/90 p-2 border border-stone-200">
+              <span className="text-[11px] text-stone-600 font-medium">Safety-net corrections:</span>
+              <b className={`font-mono text-xs ${chassisDebug.safetyNetCorrections > 0 ? 'text-purple-700 font-bold' : 'text-stone-800'}`}>
+                {chassisDebug.safetyNetCorrections}
+              </b>
+            </div>
+          </div>
+
+          <div className="mt-3 pt-2 border-t border-stone-200 flex items-center justify-between gap-1 text-[10px]">
+            <button
+              onClick={applyRolloverPose}
+              title="Test inverted chassis roof contact on ground [J]"
+              className="rounded-lg bg-stone-200 px-2.5 py-1 font-semibold text-stone-700 hover:bg-stone-300 active:scale-95 transition-all shadow-sm"
+            >
+              Rollover [J]
+            </button>
+            <button
+              onClick={applySafetyNetTestPose}
+              title="Test emergency vertical penetration safety net [K]"
+              className="rounded-lg bg-amber-100 px-2.5 py-1 font-semibold text-amber-900 hover:bg-amber-200 active:scale-95 transition-all shadow-sm border border-amber-300"
+            >
+              Safety-Net [K]
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
