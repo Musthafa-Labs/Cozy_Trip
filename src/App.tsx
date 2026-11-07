@@ -367,6 +367,11 @@ export default function App() {
     audio.init();
     audioRef.current = audio;
 
+    // Test handles for automated browser verification
+    (window as unknown as { __VEHICLE_AUDIO__?: VehicleAudio; __DRIVETRAIN__?: Drivetrain; __ENGINE__?: Engine }).__VEHICLE_AUDIO__ = audio;
+    (window as unknown as { __DRIVETRAIN__?: Drivetrain }).__DRIVETRAIN__ = drivetrain;
+    (window as unknown as { __ENGINE__?: Engine }).__ENGINE__ = engine;
+
     const handleAudioUnlock = () => {
       audio.unlock();
     };
@@ -799,6 +804,9 @@ export default function App() {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('keydown', handleAudioUnlock);
       window.removeEventListener('pointerdown', handleAudioUnlock);
+      delete (window as unknown as { __VEHICLE_AUDIO__?: unknown }).__VEHICLE_AUDIO__;
+      delete (window as unknown as { __DRIVETRAIN__?: unknown }).__DRIVETRAIN__;
+      delete (window as unknown as { __ENGINE__?: unknown }).__ENGINE__;
       audio.dispose();
       input.dispose();
       renderer.dispose();
