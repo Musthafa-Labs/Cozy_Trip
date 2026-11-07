@@ -15,6 +15,7 @@ import { Drivetrain } from './vehicle/drivetrain';
 import { BrakeSystem } from './vehicle/brakes';
 import { Aerodynamics } from './vehicle/aero';
 import { ChassisContactSystem } from './vehicle/chassisContact';
+import { VehicleAudio } from './vehicle/audio';
 import { TestGround, TestStation } from './world/testGround';
 import { VehicleVisualModel } from './vehicle/vehicleModel';
 import { DebugVisualizer } from './render/DebugVisualizer';
@@ -58,6 +59,7 @@ export default function App() {
   const brakesRef = useRef<BrakeSystem | null>(null);
   const aeroRef = useRef<Aerodynamics | null>(null);
   const chassisContactRef = useRef<ChassisContactSystem | null>(null);
+  const audioRef = useRef<VehicleAudio | null>(null);
   const groundRef = useRef<TestGround | null>(null);
   const visualModelRef = useRef<VehicleVisualModel | null>(null);
   const debugVisRef = useRef<DebugVisualizer | null>(null);
@@ -86,6 +88,7 @@ export default function App() {
   const renderWheelPos = useRef([new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()]);
   const renderSteerAngle = useRef([0, 0, 0, 0]);
   const renderSpinAngle = useRef([0, 0, 0, 0]);
+  const lastGearRef = useRef<number>(1);
 
   // Reset vehicle to designated test station
   const resetToStation = (index: number) => {
@@ -112,6 +115,7 @@ export default function App() {
     if (aero) aero.reset();
     if (chassis) chassis.reset();
     pendingSidewaysPushRef.current = false;
+    lastGearRef.current = 1;
 
     // Sync previous and current interpolation history to prevent jump on reset
     prevBodyPos.current.copy(body.position);
@@ -358,6 +362,16 @@ export default function App() {
 
     const chassisContact = new ChassisContactSystem();
     chassisContactRef.current = chassisContact;
+
+    const audio = new VehicleAudio();
+    audio.init();
+    audioRef.current = audio;
+
+    const handleAudioUnlock = () => {
+      audio.unlock();
+    };
+    window.addEventListener('keydown', handleAudioUnlock);
+    window.addEventListener('pointerdown', handleAudioUnlock);
 
     const visualModel = new VehicleVisualModel();
     scene.add(visualModel.group);
@@ -651,6 +665,24 @@ export default function App() {
 
         renderer.render(scene, camera);
 
+        // Procedural Audio Engine Update & Shift FX
+        const bodyFwdVec = SCRATCH_VEC3_A.set(0, 0, 1).applyQuaternion(rigidBody.quaternion);
+        const fwdSpeedKmh = Math.abs(rigidBody.linearVelocity.dot(bodyFwdVec)) * 3.6;
+
+        if (drivetrain.currentGear !== lastGearRef.current) {
+          audio.playShiftClunk(0.65);
+          lastGearRef.current = drivetrain.currentGear;
+        }
+
+        audio.update(
+          engine.rpm,
+          engine.throttle,
+          _frameDt,
+          drivetrain.isShifting,
+          fwdSpeedKmh,
+          drivetrain.rangeMode
+        );
+
         // React telemetry update (~20 Hz)
         const now = performance.now();
         if (now - lastUiUpdate > 50) {
@@ -765,6 +797,9 @@ export default function App() {
     return () => {
       fixedLoop.stop();
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('keydown', handleAudioUnlock);
+      window.removeEventListener('pointerdown', handleAudioUnlock);
+      audio.dispose();
       input.dispose();
       renderer.dispose();
       if (mountRef.current && renderer.domElement) {
