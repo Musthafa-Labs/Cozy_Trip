@@ -7,108 +7,108 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_AUDIO_CONFIG,
-  TRACTOR_HARMONIC_COEFFICIENTS,
-  calculateEffectiveRpm,
-  calculateFundamentalHz,
-  calculateSubBassHz,
-  calculateLpfCutoffHz,
-  calculateValveClatterCenterFreqHz,
-  calculateTCaseWhine,
-  calculateEngineVolume,
+  calculatePlaybackRate,
+  calculateLpfCutoff,
+  calculateEngineGain,
+  calculateLowRangeGearMesh,
+  calculateShiftClunkParams,
 } from './audio';
 
-test('1. Low-RPM Fundamental Pulse (18.3 Hz at 550 RPM to 233.3 Hz at 7000 RPM)', () => {
-  const idleFundamental = calculateFundamentalHz(550, 550, 7000, 18.3, 233.3);
-  assert.equal(Math.round(idleFundamental * 10) / 10, 18.3);
+test('1. Dynamic RPM Playback Rate Modulation (1.0x at 550 RPM to 2.2x at 7000 RPM)', () => {
+  // Idle (550 RPM, 0 throttle, 0 speed)
+  const idleRate = calculatePlaybackRate(550, false, 'high', 0, 0, 550, 7000, 1.0, 2.2);
+  assert.equal(Math.round(idleRate * 100) / 100, 1.0);
 
-  const redlineFundamental = calculateFundamentalHz(7000, 550, 7000, 18.3, 233.3);
-  assert.equal(Math.round(redlineFundamental * 10) / 10, 233.3);
+  // Redline (7000 RPM)
+  const redlineRate = calculatePlaybackRate(7000, false, 'high', 1.0, 100, 550, 7000, 1.0, 2.2);
+  assert.equal(Math.round(redlineRate * 100) / 100, 2.2);
 
-  // Mid-range tractor check (e.g. 3775 RPM)
-  const midFundamental = calculateFundamentalHz(3775, 550, 7000, 18.3, 233.3);
-  assert.ok(midFundamental > 120 && midFundamental < 130);
+  // Mid-range (3775 RPM)
+  const midRate = calculatePlaybackRate(3775, false, 'high', 0.5, 50, 550, 7000, 1.0, 2.2);
+  assert.ok(midRate > 1.5 && midRate < 1.7);
 });
 
-test('2. Deep Exhaust Compression Sub-Bass is 1 octave below fundamental (9.15 Hz to 116.65 Hz)', () => {
-  const idleSubBass = calculateSubBassHz(18.3);
-  assert.equal(Math.round(idleSubBass * 100) / 100, 9.15);
+test('2. Gear Shift State Machine: 22% playbackRate dip during clutch disengagement', () => {
+  const normalRate = calculatePlaybackRate(3000, false, 'high', 0.8, 40, 550, 7000, 1.0, 2.2);
+  const shiftingRate = calculatePlaybackRate(3000, true, 'high', 0.8, 40, 550, 7000, 1.0, 2.2);
 
-  const redlineSubBass = calculateSubBassHz(233.3);
-  assert.equal(Math.round(redlineSubBass * 100) / 100, 116.65);
+  // shiftingRate must equal normalRate * 0.78 (22% drop)
+  assert.equal(Math.round((shiftingRate / normalRate) * 100) / 100, 0.78);
+  assert.ok(shiftingRate < normalRate);
 });
 
-test('3. Ultra-Muffled Dual LPF Cascade Cutoff is strictly bounded between 140 Hz and 350 Hz', () => {
-  const idleCutoff = calculateLpfCutoffHz(0, 140.0, 350.0);
-  assert.equal(idleCutoff, 140.0);
+test('3. Reverse & LOW Range State Handling', () => {
+  // Reverse throttle (-1.0) produces steady engine rumble between 1.05x and 1.20x
+  const revRate = calculatePlaybackRate(800, false, 'high', -1.0, -5.0, 550, 7000, 1.0, 2.2);
+  assert.ok(revRate >= 1.05 && revRate <= 1.20);
 
-  const redlineCutoff = calculateLpfCutoffHz(1.0, 140.0, 350.0);
-  assert.equal(redlineCutoff, 350.0);
+  // LOW range compresses speed-to-RPM sweep (shorter gear acceleration bands)
+  const highRate = calculatePlaybackRate(2500, false, 'high', 0.5, 20, 550, 7000, 1.0, 2.2);
+  const lowRate = calculatePlaybackRate(2500, false, 'low', 0.5, 20, 550, 7000, 1.0, 2.2);
+  assert.ok(lowRate > highRate, 'LOW range rev pitch should be higher for same RPM fraction');
+});
+
+test('4. Dynamic LPF Modulation (180 Hz at idle to 450 Hz at high speed)', () => {
+  // Idle (550 RPM, 0 throttle, 0 speed)
+  const idleCutoff = calculateLpfCutoff(550, 0, 0, 'high', 180.0, 450.0);
+  assert.equal(idleCutoff, 180.0);
+
+  // High speed redline (7000 RPM, 1.0 throttle, 80 km/h)
+  const highCutoff = calculateLpfCutoff(7000, 1.0, 80, 'high', 180.0, 450.0);
+  assert.equal(highCutoff, 450.0);
 
   // Boundary clamping
-  assert.equal(calculateLpfCutoffHz(-0.5, 140.0, 350.0), 140.0);
-  assert.equal(calculateLpfCutoffHz(1.5, 140.0, 350.0), 350.0);
+  const clampedCutoff = calculateLpfCutoff(100, -1.0, -50, 'high', 180.0, 450.0);
+  assert.ok(clampedCutoff >= 180.0 && clampedCutoff <= 450.0);
+  assert.ok(calculateLpfCutoff(9000, 2.0, 200, 'high', 180.0, 450.0) <= 450.0);
 });
 
-test('4. Tractor PeriodicWave Table Harmonics: dominant 1st (1.0) and 2nd (0.7)', () => {
-  const expected = [1.0, 0.70, 0.10, 0.015, 0.002, 0.0005];
-  assert.deepEqual(Array.from(TRACTOR_HARMONIC_COEFFICIENTS), expected);
-  assert.equal(TRACTOR_HARMONIC_COEFFICIENTS[0], 1.0);
-  assert.equal(TRACTOR_HARMONIC_COEFFICIENTS[1], 0.70);
-  for (let i = 2; i < expected.length; i++) {
-    assert.ok(TRACTOR_HARMONIC_COEFFICIENTS[i] < TRACTOR_HARMONIC_COEFFICIENTS[i - 1]);
-  }
+test('5. Master Volume Attenuation: baseline floor 0.28, ceiling 0.38, 15% shift ducking', () => {
+  // Stationary idle: exact baseline floor 0.28
+  const idleGain = calculateEngineGain(0, 0, false, 0.28, 0.38);
+  assert.equal(idleGain, 0.28);
+
+  // Full throttle redline: capped at 0.38 max ceiling
+  const fullGain = calculateEngineGain(1.0, 1.0, false, 0.28, 0.38);
+  assert.equal(fullGain, 0.38);
+
+  // During gear shift: ducks by 15% (gain * 0.85)
+  const shiftingGain = calculateEngineGain(1.0, 1.0, true, 0.28, 0.38);
+  assert.equal(Math.round((shiftingGain / fullGain) * 100) / 100, 0.85);
+
+  // Idle shifting gain
+  const idleShiftingGain = calculateEngineGain(0, 0, true, 0.28, 0.38);
+  assert.equal(Math.round((idleShiftingGain / idleGain) * 100) / 100, 0.85);
 });
 
-test('5. Low-Speed & Reverse Volume Floor maintains strict 0.78 minimum gain', () => {
-  // Stationary idle (0 throttle, 0 RPM frac)
-  const idleVol = calculateEngineVolume(0, 0);
-  assert.equal(idleVol, 0.78);
-
-  // Reverse / low crawl with full reverse throttle (-1.0)
-  const revVol = calculateEngineVolume(-1.0, 0.05);
-  assert.ok(revVol >= 0.78);
-  assert.ok(revVol > 0.95);
-
-  // Forward throttle
-  const fwdVol = calculateEngineVolume(0.5, 0.2);
-  assert.ok(fwdVol >= 0.78);
+test('6. Shift Mechanical Clunk: 55 Hz -> 15 Hz, 0.07s burst, max volume 0.30', () => {
+  const clunk = calculateShiftClunkParams();
+  assert.equal(clunk.durationSec, 0.07);
+  assert.equal(clunk.startFreqHz, 55.0);
+  assert.equal(clunk.endFreqHz, 15.0);
+  assert.equal(clunk.maxVolume, 0.30);
 });
 
-test('6. Mechanical Rocker & Injection Clatter center frequency is around 950 Hz', () => {
-  const idleClatter = calculateValveClatterCenterFreqHz(0);
-  assert.ok(idleClatter >= 930 && idleClatter <= 970);
-
-  const redlineClatter = calculateValveClatterCenterFreqHz(1.0);
-  assert.ok(redlineClatter >= 930 && redlineClatter <= 970);
-});
-
-test('7. LOW Range Gear-Mesh Whine scales 110 Hz -> 220 Hz (no laser/beam tones)', () => {
+test('7. LOW Range Gear-Mesh Whine: 120 Hz to 220 Hz bandpass noise', () => {
   // Silent when stationary
-  const stationaryLow = calculateTCaseWhine(0, 'low');
+  const stationaryLow = calculateLowRangeGearMesh(0, 'low');
   assert.equal(stationaryLow.active, false);
   assert.equal(stationaryLow.volume, 0);
 
-  // Silent in HIGH range even at high speed
-  const highwayHigh = calculateTCaseWhine(60, 'high');
+  // Silent in HIGH range even at highway speed
+  const highwayHigh = calculateLowRangeGearMesh(70, 'high');
   assert.equal(highwayHigh.active, false);
   assert.equal(highwayHigh.volume, 0);
 
-  // Low range crawl
-  const crawlLow = calculateTCaseWhine(1.0, 'low');
+  // Active in LOW range crawl (~5 km/h)
+  const crawlLow = calculateLowRangeGearMesh(5.0, 'low');
   assert.equal(crawlLow.active, true);
-  assert.ok(crawlLow.frequencyHz >= 110 && crawlLow.frequencyHz <= 120);
+  assert.ok(crawlLow.centerFreqHz >= 120 && crawlLow.centerFreqHz <= 140);
+  assert.ok(crawlLow.volume > 0);
 
-  // Low range max speed (~45 km/h)
-  const topLow = calculateTCaseWhine(45, 'low');
+  // Active in LOW range top speed (45 km/h)
+  const topLow = calculateLowRangeGearMesh(45, 'low');
   assert.equal(topLow.active, true);
-  assert.equal(Math.round(topLow.frequencyHz), 220);
-});
-
-test('8. Gear Shift RPM Dip applies an exact 20% frequency dip during clutch disengagement', () => {
-  const normalRpm = 3000;
-  const shiftingRpm = calculateEffectiveRpm(normalRpm, true);
-  assert.equal(shiftingRpm, 2400); // 3000 * 0.80
-
-  const steadyRpm = calculateEffectiveRpm(normalRpm, false);
-  assert.equal(steadyRpm, 3000);
+  assert.equal(Math.round(topLow.centerFreqHz), 220);
+  assert.ok(topLow.volume <= 0.045);
 });

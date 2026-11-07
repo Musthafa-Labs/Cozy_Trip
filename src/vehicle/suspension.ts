@@ -34,6 +34,11 @@ export class WheelState {
   public readonly contactNormal = new THREE.Vector3(0, 1, 0);
   public readonly wheelWorldPosition = new THREE.Vector3();
 
+  // FIX H: Over-travel hard stop telemetry and state
+  public overTravel: number = 0;               // Travel beyond maxTravel (m)
+  public previousOverTravel: number = 0;       // Previous frame overTravel (m)
+  public overTravelVelocity: number = 0;       // Rate of change of overTravel (m/s)
+
   // Internal history
   public previousCompression: number = 0;
 
@@ -44,10 +49,13 @@ export class WheelState {
 }
 
 export interface SuspensionSystemConfig {
-  frontArbStiffness: number; // Front anti-roll bar stiffness (N/m)
-  rearArbStiffness: number;  // Rear anti-roll bar stiffness (N/m)
-  bumpStopThreshold: number; // Fraction of stroke where bump stop engages (e.g. 0.85 = 85%)
-  bumpStopStiffness: number; // Non-linear bump stop stiffness (N/m^2)
+  frontArbStiffness?: number; // Front anti-roll bar stiffness (N/m)
+  rearArbStiffness?: number;  // Rear anti-roll bar stiffness (N/m)
+  bumpStopThreshold?: number; // Fraction of stroke where bump stop engages (e.g. 0.85 = 85%)
+  bumpStopStiffness?: number; // Non-linear bump stop stiffness (N/m^2)
+  hardStopStiffness?: number; // Hard stop stiffness beyond maxTravel (N/m)
+  hardStopDamping?: number;   // Hard stop damping beyond maxTravel (N*s/m)
+  hardStopMaxForce?: number;  // Hard stop maximum clamping force (N)
 }
 
 export class SuspensionSystem {
@@ -63,11 +71,21 @@ export class SuspensionSystem {
   public bumpStopThreshold: number;
   public bumpStopStiffness: number;
 
+  // FIX H: Hard stop configuration for suspension bottom-out
+  public hardStopStiffness: number; // Hard stop stiffness beyond maxTravel (N/m)
+  public hardStopDamping: number;   // Hard stop damping beyond maxTravel (N*s/m)
+  public hardStopMaxForce: number;  // Hard stop maximum clamping force (N)
+
   constructor(config: Partial<SuspensionSystemConfig> = {}) {
     this.frontArbStiffness = config.frontArbStiffness ?? 9500;
     this.rearArbStiffness = config.rearArbStiffness ?? 7500;
     this.bumpStopThreshold = config.bumpStopThreshold ?? 0.80;
     this.bumpStopStiffness = config.bumpStopStiffness ?? 150000;
+
+    // FIX H: Hard stop parameter defaults with units
+    this.hardStopStiffness = config.hardStopStiffness ?? 200000; // N/m
+    this.hardStopDamping = config.hardStopDamping ?? 40000;       // N*s/m
+    this.hardStopMaxForce = config.hardStopMaxForce ?? 45000;    // N
 
     const restLength = 0.65;
     const maxTravel = 0.35;
@@ -164,6 +182,15 @@ export class SuspensionSystem {
         const unconstrainedCompression = maxReach - verticalDist;
         wheel.compression = clamp(unconstrainedCompression, 0, cfg.maxTravel);
 
+        // FIX H: Bottom-out over-travel calculation
+        const over = Math.max(0, unconstrainedCompression - cfg.maxTravel);
+        if (!wheel.wasGrounded) {
+          wheel.previousOverTravel = over;
+        }
+        wheel.overTravelVelocity = clamp((over - wheel.previousOverTravel) / Math.max(0.0001, dt), -5, 5);
+        wheel.previousOverTravel = over;
+        wheel.overTravel = over;
+
         // PART C.1: First contact spike suppression
         if (!wheel.wasGrounded) {
           wheel.previousCompression = wheel.compression;
@@ -190,6 +217,9 @@ export class SuspensionSystem {
         wheel.compressionVelocity = 0;
         wheel.previousCompression = 0;
         wheel.normalLoad = 0;
+        wheel.overTravel = 0;
+        wheel.previousOverTravel = 0;
+        wheel.overTravelVelocity = 0;
         wheel.wheelWorldPosition.copy(worldMount).addScaledVector(bodyDown, cfg.restLength);
       }
     }
@@ -227,6 +257,15 @@ export class SuspensionSystem {
         bumpStopForce = this.bumpStopStiffness * (excess ** 2);
       }
 
+      // FIX H: Bottom-out hard stop force
+      let hardStopForce = 0;
+      if (wheel.overTravel > 0) {
+        hardStopForce = this.hardStopStiffness * wheel.overTravel + this.hardStopDamping * wheel.overTravelVelocity;
+        hardStopForce = clamp(hardStopForce, 0, this.hardStopMaxForce);
+      } else {
+        hardStopForce = 0;
+      }
+
       // Anti-roll bar adjustment
       let arbDelta = 0;
       if (wheel.id === 'FL') arbDelta = -frontArbForce;
@@ -234,7 +273,7 @@ export class SuspensionSystem {
       else if (wheel.id === 'RL') arbDelta = -rearArbForce;
       else if (wheel.id === 'RR') arbDelta = rearArbForce;
 
-      const rawLoad = springForce + dampingForce + bumpStopForce + arbDelta;
+      const rawLoad = springForce + dampingForce + bumpStopForce + hardStopForce + arbDelta;
       wheel.normalLoad = Math.max(0, rawLoad);
 
       // Suspension force vector: push along contact surface normal
