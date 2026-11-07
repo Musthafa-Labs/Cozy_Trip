@@ -49,8 +49,6 @@ export interface TelemetryData {
   rangeMode: RangeMode;      // 'high' | 'low'
   overallRatio: number;      // dimensionless overall ratio
   clutchEngagement: number;  // 0 .. 1.0
-  isEngineRunning: boolean;  // diesel engine ignition/running state
-  isEngineStalled: boolean;  // diesel engine stall flag
   absActive: [boolean, boolean, boolean, boolean];
   absGlobalActive: boolean;
   absEnabled: boolean;
@@ -71,7 +69,6 @@ interface DebugOverlayProps {
   onToggleTransMode?: () => void;
   onToggleRange?: () => void;
   onToggleAbs?: () => void;
-  onToggleIgnition?: () => void;
   onShiftUp?: () => void;
   onShiftDown?: () => void;
 }
@@ -89,7 +86,6 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
   onToggleTransMode,
   onToggleRange,
   onToggleAbs,
-  onToggleIgnition,
   onShiftUp,
   onShiftDown,
 }) => {
@@ -279,25 +275,16 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
                 <div className="flex items-baseline gap-1.5">
                   <span
                     className={`font-mono text-2xl font-black ${
-                      telemetry.isEngineStalled
-                        ? 'text-red-600'
-                        : telemetry.engineRpm >= 4200
+                      telemetry.engineRpm >= 6800
                         ? 'text-red-600 animate-pulse'
+                        : telemetry.engineRpm >= 6000
+                        ? 'text-amber-600'
                         : 'text-stone-900'
                     }`}
                   >
                     {telemetry.engineRpm.toFixed(0)}
                   </span>
                   <span className="text-[10px] font-bold text-stone-400">RPM</span>
-                  {telemetry.isEngineStalled && (
-                    <button
-                      onClick={onToggleIgnition}
-                      title="Click to start engine [I]"
-                      className="rounded bg-red-600 px-1.5 py-0.5 text-[9px] font-extrabold text-white uppercase tracking-wider animate-pulse hover:bg-red-700 active:scale-95"
-                    >
-                      STALLED [I]
-                    </button>
-                  )}
                 </div>
                 <div className="flex items-baseline gap-1">
                   <span className="font-mono text-lg font-bold text-stone-900">
@@ -307,22 +294,20 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
                 </div>
               </div>
 
-              {/* Graphical RPM Bar scaled to Diesel 4800 RPM max */}
+              {/* Graphical RPM Bar scaled to 7500 RPM max */}
               <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-stone-200">
                 <div
                   className={`h-full transition-all duration-75 ${
-                    telemetry.isEngineStalled
+                    telemetry.engineRpm >= 6800
                       ? 'bg-red-600'
-                      : telemetry.engineRpm >= 4200
-                      ? 'bg-red-600'
-                      : telemetry.engineRpm > 3600
+                      : telemetry.engineRpm > 5500
                       ? 'bg-amber-500'
                       : 'bg-emerald-500'
                   }`}
                   style={{
                     width: `${Math.min(
                       100,
-                      Math.max(0, (telemetry.engineRpm / 4800) * 100)
+                      Math.max(0, (telemetry.engineRpm / 7500) * 100)
                     )}%`,
                   }}
                 />
@@ -745,9 +730,6 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
           </span>
           <span className="rounded bg-stone-200/80 px-2 py-0.5 font-mono text-[11px] text-stone-800">
             [B] ABS On/Off
-          </span>
-          <span className="rounded bg-rose-100 px-2 py-0.5 font-mono text-[11px] text-rose-900 font-bold border border-rose-300">
-            [I] Ignition
           </span>
           <span className="rounded bg-stone-200/80 px-2 py-0.5 font-mono text-[11px] text-stone-800">
             [R] Reset

@@ -38,8 +38,8 @@ export const DEFAULT_TRANSMISSION_CONFIG: TransmissionConfig = {
   drivetrainEfficiency: 0.92,
   shiftDuration: 0.22,
   minShiftInterval: 1.0,
-  clutchEngageStartRpm: 850,
-  clutchEngageLockRpm: 1600,
+  clutchEngageStartRpm: 1050,
+  clutchEngageLockRpm: 2100,
   clutchMaxTorqueCapacity: 650,
   differentialType: 'lsd',
   lsdStiffness: 50.0,
@@ -141,13 +141,13 @@ export class Drivetrain {
       return false;
     }
 
-    // Safety: prevent downshift over-rev (where new gear would push RPM > 4300)
+    // Safety: prevent downshift over-rev
     if (gear > 0 && gear < this.currentGear) {
       const currentOverall = this.getOverallRatio(this.currentGear);
       const newOverall = this.getOverallRatio(gear);
       if (Math.abs(currentOverall) > 0.001) {
         const projectedRpm = (engineRpm * newOverall) / currentOverall;
-        if (projectedRpm > 4300) {
+        if (projectedRpm > 6800) {
           return false;
         }
       }
@@ -192,9 +192,8 @@ export class Drivetrain {
     }
 
     if (this.currentGear >= 1) {
-      // Diesel-adapted shift points: cruise at 1850-2400 RPM, peak power shift at 3800 RPM
-      const upshiftThreshold = lerp(1850, 3800, throttle);
-      const downshiftThreshold = lerp(1100, 2200, throttle);
+      const upshiftThreshold = lerp(3200, 6000, throttle);
+      const downshiftThreshold = lerp(1600, 3600, throttle);
 
       const maxAllowedGear = this.rangeMode === 'low' ? this.config.lowRangeMaxGear : 6;
       const currentRatio = this.getOverallRatio(this.currentGear);
@@ -219,7 +218,7 @@ export class Drivetrain {
         const lowerRatio = this.getOverallRatio(lowerGear);
         if (Math.abs(lowerRatio) > 0.001) {
           const predictedRpm = (engineRpm * lowerRatio) / currentRatio;
-          if (predictedRpm <= upshiftThreshold - 300 && predictedRpm < 4200) {
+          if (predictedRpm <= upshiftThreshold - 300 && predictedRpm < 6800) {
             this.requestGear(lowerGear, forwardSpeedMs, engineRpm);
             return;
           }
@@ -258,7 +257,6 @@ export class Drivetrain {
     // 2. Wheel angular velocity feedback from driven axle(s)
     let drivenOmegaSum = 0;
     let drivenWheelCount = 0;
-
     // Check front wheels
     if (this.layout === 'AWD' || this.layout === 'FWD') {
       drivenOmegaSum += wheelsDyn[0].omega + wheelsDyn[1].omega;
@@ -286,37 +284,14 @@ export class Drivetrain {
     if (this.currentGear === 0 || this.isShifting) {
       // Neutral or mid-shift: clutch is released / slipping
       this.clutchEngagement = this.isShifting ? 0.15 : 0.0;
-    } else if (this.mode === 'auto') {
-      // Automatic Mode: fluid coupling / auto-clutch
-      // Progressive engagement between start RPM (850) and lockup RPM (1600)
+    } else {
+      // In gear: progressive engagement between start RPM and lockup RPM
       const lockupRange = this.config.clutchEngageLockRpm - this.config.clutchEngageStartRpm;
       const rawEngagement = (engine.rpm - this.config.clutchEngageStartRpm) / lockupRange;
       this.clutchEngagement = clamp(rawEngagement, 0, 1.0);
-
-      // If vehicle is rolling at speed in gear, clutch stays locked
-      if (Math.abs(forwardSpeedMs) > 1.8 && engine.rpm > engine.config.idleRpm + 100) {
+      // If the vehicle is moving at reasonable speed in gear, the clutch stays locked
+      if (Math.abs(forwardSpeedMs) > 2.0 && engine.rpm > engine.config.idleRpm + 150) {
         this.clutchEngagement = Math.max(this.clutchEngagement, 0.95);
-      }
-    } else {
-      // Manual Mode:
-      // In manual mode, the clutch is mechanically coupled without automatic disengagement.
-      if (Math.abs(forwardSpeedMs) > 1.5) {
-        // While moving in gear, clutch remains firmly locked
-        this.clutchEngagement = 1.0;
-      } else {
-        // Near standstill in manual gear:
-        const isLowLaunchGear = this.currentGear === 1 || this.currentGear === -1 || (this.rangeMode === 'low' && this.currentGear <= 2);
-        if (isLowLaunchGear) {
-          const lockupRange = this.config.clutchEngageLockRpm - this.config.clutchEngageStartRpm;
-          const rawEngagement = (engine.rpm - this.config.clutchEngageStartRpm) / lockupRange;
-          // In 1st gear manual: clutch bites at minimum 0.25. If brakes held or stationary without throttle,
-          // targetDrivetrainRpm is 0, so driveline drag pulls engine below 450 RPM and stalls!
-          this.clutchEngagement = clamp(rawEngagement, 0.25, 1.0);
-        } else {
-          // Attempting to move or stopped in 2nd, 3rd, 4th, etc. in manual mode:
-          // Heavy clutch load (0.80) lugs the engine immediately below stall threshold
-          this.clutchEngagement = 0.80;
-        }
       }
     }
 

@@ -67,8 +67,6 @@ export default function App() {
   const stationIndexRef = useRef<number>(0);
   const inputRef = useRef<InputManager | null>(null);
   const pendingSidewaysPushRef = useRef<boolean>(false);
-  const progressiveThrottleRef = useRef<number>(0);
-  const wasStalledRef = useRef<boolean>(false);
 
   // Preallocated structures for render interpolation
   const prevBodyPos = useRef(new THREE.Vector3());
@@ -114,8 +112,6 @@ export default function App() {
     if (aero) aero.reset();
     if (chassis) chassis.reset();
     pendingSidewaysPushRef.current = false;
-    progressiveThrottleRef.current = 0;
-    wasStalledRef.current = false;
 
     // Sync previous and current interpolation history to prevent jump on reset
     prevBodyPos.current.copy(body.position);
@@ -249,17 +245,6 @@ export default function App() {
     }
   };
 
-  // Toggle Engine Ignition / Start [I]
-  const toggleIgnition = () => {
-    const eng = engineRef.current;
-    if (!eng) return;
-    eng.toggleIgnition();
-    if (eng.isRunning) {
-      showHudMessage('Engine Started', 1200);
-    } else {
-      showHudMessage('Engine Stopped', 1200);
-    }
-  };
 
   const manualShiftUp = () => {
     const dt = drivetrainRef.current;
@@ -490,16 +475,7 @@ export default function App() {
           if (brakeKey) brakePedal = 1.0;
         }
 
-        // Progressive rate limiting in fixed 120 Hz timestep
-        const currentProgressive = progressiveThrottleRef.current;
-        if (targetThrottle > currentProgressive) {
-          const riseRate = 1.45; // ~0.7s from 0 to 1.0
-          progressiveThrottleRef.current = Math.min(targetThrottle, currentProgressive + riseRate * dt);
-        } else if (targetThrottle < currentProgressive) {
-          const decayRate = 2.50; // ~0.4s from 1.0 to 0.0
-          progressiveThrottleRef.current = Math.max(targetThrottle, currentProgressive - decayRate * dt);
-        }
-        const throttlePedal = progressiveThrottleRef.current;
+        const throttlePedal = targetThrottle;
 
         // =====================================================================
         // D. Transmission & Engine Dynamics Integration
@@ -516,11 +492,6 @@ export default function App() {
           dt
         );
 
-        // Check if engine newly stalled
-        if (engine.isStalled && !wasStalledRef.current) {
-          showHudMessage('Engine Stalled — Press [I] to Start', 2500);
-        }
-        wasStalledRef.current = engine.isStalled;
 
         // Second pass: compute driveshaft torque and split to driven wheels with final engine output
         drivetrain.update(engine, wheelsDyn, forwardSpeedMs, dt, false);
@@ -620,9 +591,6 @@ export default function App() {
         }
         if (input.wasJustPressed('l')) {
           toggleRangeCase();
-        }
-        if (input.wasJustPressed('i')) {
-          toggleIgnition();
         }
 
         // =====================================================================
@@ -762,8 +730,6 @@ export default function App() {
             rangeMode: drivetrain.rangeMode,
             overallRatio: drivetrain.getOverallRatio(),
             clutchEngagement: drivetrain.clutchEngagement,
-            isEngineRunning: engine.isRunning,
-            isEngineStalled: engine.isStalled,
             absActive: [...brakes.absActive],
             absGlobalActive: brakes.absGlobalActive,
             absEnabled: brakes.config.absEnabled,
@@ -829,7 +795,6 @@ export default function App() {
         onToggleTransMode={toggleTransmissionMode}
         onToggleRange={toggleRangeCase}
         onToggleAbs={toggleAbs}
-        onToggleIgnition={toggleIgnition}
         hudMessage={hudMessage}
         onShiftUp={manualShiftUp}
         onShiftDown={manualShiftDown}
