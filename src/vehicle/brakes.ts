@@ -22,7 +22,7 @@ export const DEFAULT_BRAKE_CONFIG: BrakeConfig = {
   frontBias: 0.65,
   handbrakeTorque: 2600,
   pedalResponseTau: 0.05,
-  absEnabled: true,
+  absEnabled: false,
   absMinSpeedMs: 2.2,
   absSlipThreshold: 0.16,
   absPulseFrequency: 18,

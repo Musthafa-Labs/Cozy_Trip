@@ -65,6 +65,11 @@ export class ChassisContactSystem {
   private readonly _collidingNormals: THREE.Vector3[] = [];
   private readonly _collidingPens: number[] = [];
 
+  // Preallocated buffer for active terrain ground contacts in a single step (up to 350 points)
+  private readonly _terrainWorldPoints: THREE.Vector3[] = [];
+  private readonly _terrainNormals: THREE.Vector3[] = [];
+  private readonly _terrainPens: number[] = [];
+
   private readonly _obsResult: ObstacleContactResult = {
     penetration: 0,
     normal: new THREE.Vector3(),
@@ -85,6 +90,9 @@ export class ChassisContactSystem {
       this._collidingWorldPoints.push(new THREE.Vector3());
       this._collidingNormals.push(new THREE.Vector3());
       this._collidingPens.push(0);
+      this._terrainWorldPoints.push(new THREE.Vector3());
+      this._terrainNormals.push(new THREE.Vector3());
+      this._terrainPens.push(0);
     }
   }
 
@@ -372,13 +380,15 @@ export class ChassisContactSystem {
   public update(
     rigidBody: RigidBody,
     ground: TestGround,
-    _dt: number,
+    dt: number,
     suspension?: SuspensionSystem,
     wheelsDyn?: WheelDynamics[]
   ): void {
+    const fixedDt = dt > 0 ? dt : 1 / 120;
     let penetratingCount = 0;
     let deepestGroundPenetration = 0;
     let deepestObsPenetration = 0;
+    let terrainContactCount = 0;
     let obsContactCount = 0;
     this._dominantObsNormal.set(0, 0, 0);
 
@@ -392,11 +402,9 @@ export class ChassisContactSystem {
     for (let i = 0; i < numPoints; i++) {
       rigidBody.localToWorld(this.localPoints[i], this._worldPoint);
 
-      // 1. Terrain Surface Height Query & Contact
+      // 1. Terrain Surface Height Query
       const groundInfo = ground.getHeightNormalSurface(this._worldPoint.x, this._worldPoint.z);
-      this._groundNormal.copy(groundInfo.normal);
       const groundHeight = groundInfo.height;
-
       const groundPen = groundHeight - this._worldPoint.y;
 
       if (groundPen > 0) {
@@ -405,17 +413,12 @@ export class ChassisContactSystem {
           deepestGroundPenetration = groundPen;
         }
 
-        rigidBody.getPointVelocity(this._worldPoint, this._pointVel);
-        const vNormal = this._pointVel.dot(this._groundNormal);
-        const normalForce = Math.max(0, this.stiffness * groundPen - this.damping * vNormal);
-
-        this._vTangent.copy(this._pointVel).addScaledVector(this._groundNormal, -vNormal);
-        const tangentSpeed = this._vTangent.length();
-        const denom = Math.max(tangentSpeed, 0.2);
-        this._frictionForce.copy(this._vTangent).multiplyScalar((-this.mu * normalForce) / denom);
-
-        this._totalForce.copy(this._groundNormal).multiplyScalar(normalForce).add(this._frictionForce);
-        rigidBody.applyForceAtWorldPoint(this._totalForce, this._worldPoint);
+        if (terrainContactCount < this._terrainWorldPoints.length) {
+          this._terrainWorldPoints[terrainContactCount].copy(this._worldPoint);
+          this._terrainNormals[terrainContactCount].copy(groundInfo.normal);
+          this._terrainPens[terrainContactCount] = groundPen;
+          terrainContactCount++;
+        }
       }
 
       // 2. 3D Solid Static Obstacle Contact (Cube)
@@ -439,7 +442,86 @@ export class ChassisContactSystem {
     }
 
     // -------------------------------------------------------------------------
-    // B. Evaluate Wheel Cylinders against Obstacles
+    // Safety-net correction for severe TERRAIN GROUND penetration (e.g. test hook or falling through)
+    // Prevents explosive energy injection by clearing accumulators and damping velocity
+    // -------------------------------------------------------------------------
+    if (deepestGroundPenetration > 0.5) {
+      const lift = deepestGroundPenetration - 0.05;
+      rigidBody.position.y += lift;
+      rigidBody.clearAccumulators();
+      if (rigidBody.linearVelocity.y < 0) {
+        rigidBody.linearVelocity.y = 0;
+      }
+      rigidBody.linearVelocity.x *= 0.5;
+      rigidBody.linearVelocity.z *= 0.5;
+      rigidBody.angularVelocity.multiplyScalar(0.2);
+      this.safetyNetCounter++;
+      this.penetratingContactCount = penetratingCount;
+      this.maxPenetrationMeters = Math.max(deepestGroundPenetration, deepestObsPenetration);
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // B. Resolve Terrain Ground Contacts (Load-Shared, Dissipative, Anti-Energy)
+    // -------------------------------------------------------------------------
+    if (terrainContactCount > 0) {
+      const countScale = 1.0 / Math.max(1, Math.sqrt(terrainContactCount));
+      const kPoint = this.stiffness * countScale;
+      const cPoint = this.damping * countScale;
+
+      for (let j = 0; j < terrainContactCount; j++) {
+        const pt = this._terrainWorldPoints[j];
+        const normal = this._terrainNormals[j];
+        const pen = this._terrainPens[j];
+
+        rigidBody.getPointVelocity(pt, this._pointVel);
+        const vNormal = this._pointVel.dot(normal);
+
+        const r = this._rWorld.copy(pt).sub(this._worldCOM);
+        const rxn = this._rxn.crossVectors(r, normal);
+        const invInertiaRxn = this._invInertiaRxn.copy(rxn).applyMatrix3(this._invInertiaWorld);
+        const angularTerm = this._vTangent.crossVectors(invInertiaRxn, r).dot(normal);
+        const mEffInv = rigidBody.invMass + Math.max(0, angularTerm);
+        const mEff = 1.0 / mEffInv;
+
+        // Damping: strictly dissipative, preventing any velocity reversal
+        let dampForce = 0;
+        if (vNormal < 0) {
+          const maxDamp = 0.85 * (mEff * Math.abs(vNormal) / fixedDt);
+          dampForce = Math.min(cPoint * Math.abs(vNormal), maxDamp);
+        } else {
+          dampForce = -Math.min(cPoint * vNormal, kPoint * pen);
+        }
+
+        const maxNormalPerPoint = (rigidBody.mass * 25.0) / Math.max(1, terrainContactCount * 0.5);
+        const normalForce = Math.max(0, Math.min(maxNormalPerPoint, kPoint * pen + dampForce));
+
+        this._totalForce.copy(normal).multiplyScalar(normalForce);
+
+        this._vTangent.copy(this._pointVel).addScaledVector(normal, -vNormal);
+        const tanSpeed = this._vTangent.length();
+
+        if (tanSpeed > 1e-4) {
+          const tanDir = this._vTangent.normalize();
+          const rxt = this._rxn.crossVectors(r, tanDir);
+          const invInertiaRxt = this._invInertiaRxn.copy(rxt).applyMatrix3(this._invInertiaWorld);
+          const tanAngularTerm = this._rxn.crossVectors(invInertiaRxt, r).dot(tanDir);
+          const mEffTanInv = rigidBody.invMass + Math.max(0, tanAngularTerm);
+          const mEffTan = 1.0 / mEffTanInv;
+
+          const maxFrictionCoulomb = this.mu * normalForce;
+          const maxFrictionStop = 0.85 * (mEffTan * tanSpeed / fixedDt);
+          const frictionMag = Math.min(maxFrictionCoulomb, maxFrictionStop);
+
+          this._totalForce.addScaledVector(tanDir, -frictionMag);
+        }
+
+        rigidBody.applyForceAtWorldPoint(this._totalForce, pt);
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // C. Evaluate Wheel Cylinders against Obstacles
     // -------------------------------------------------------------------------
     if (suspension) {
       this.collectWheelContacts(rigidBody, ground, suspension, wheelsDyn, (worldPt, pen, norm) => {
@@ -458,7 +540,7 @@ export class ChassisContactSystem {
     }
 
     // -------------------------------------------------------------------------
-    // C. Resolve Obstacle Contact Impulses & Reaction Forces
+    // D. Resolve Obstacle Contact Impulses & Reaction Forces
     // -------------------------------------------------------------------------
     if (obsContactCount > 0) {
       for (let j = 0; j < obsContactCount; j++) {
@@ -516,19 +598,6 @@ export class ChassisContactSystem {
         this._totalForce.copy(normal).multiplyScalar(normalForce).add(this._frictionForce);
         rigidBody.applyForceAtWorldPoint(this._totalForce, pt);
       }
-    }
-
-    // -------------------------------------------------------------------------
-    // Rule B: Safety-net correction for TERRAIN GROUND penetration only
-    // -------------------------------------------------------------------------
-    if (deepestGroundPenetration > 0.5) {
-      const lift = deepestGroundPenetration - 0.05;
-      rigidBody.position.y += lift;
-
-      if (rigidBody.linearVelocity.y < 0) {
-        rigidBody.linearVelocity.y = 0;
-      }
-      this.safetyNetCounter++;
     }
 
     this.penetratingContactCount = penetratingCount;

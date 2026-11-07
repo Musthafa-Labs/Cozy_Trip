@@ -34,6 +34,19 @@ export default function App() {
     maxPenetrationCm: 0,
     safetyNetCorrections: 0,
   });
+  const [hudMessage, setHudMessage] = useState<string | null>(null);
+  const messageTimerRef = useRef<number | null>(null);
+
+  const showHudMessage = (msg: string, durationMs: number = 1500) => {
+    if (messageTimerRef.current !== null) {
+      clearTimeout(messageTimerRef.current);
+    }
+    setHudMessage(msg);
+    messageTimerRef.current = window.setTimeout(() => {
+      setHudMessage(null);
+      messageTimerRef.current = null;
+    }, durationMs);
+  };
 
   // Live simulation references
   const rigidBodyRef = useRef<RigidBody | null>(null);
@@ -53,6 +66,9 @@ export default function App() {
   const prevCarFollowPos = useRef(new THREE.Vector3(0, 0.85, 0));
   const stationIndexRef = useRef<number>(0);
   const inputRef = useRef<InputManager | null>(null);
+  const pendingSidewaysPushRef = useRef<boolean>(false);
+  const progressiveThrottleRef = useRef<number>(0);
+  const wasStalledRef = useRef<boolean>(false);
 
   // Preallocated structures for render interpolation
   const prevBodyPos = useRef(new THREE.Vector3());
@@ -97,6 +113,9 @@ export default function App() {
     if (brakes) brakes.reset();
     if (aero) aero.reset();
     if (chassis) chassis.reset();
+    pendingSidewaysPushRef.current = false;
+    progressiveThrottleRef.current = 0;
+    wasStalledRef.current = false;
 
     // Sync previous and current interpolation history to prevent jump on reset
     prevBodyPos.current.copy(body.position);
@@ -138,13 +157,9 @@ export default function App() {
     resetToStation(stationIndexRef.current + 1);
   };
 
-  // Lateral push impulse for roll & stability verification
+  // Lateral push impulse for roll & stability verification (4,500 Ns applied at roof height +0.6m in +X)
   const applySidewaysPush = () => {
-    const body = rigidBodyRef.current;
-    if (!body) return;
-    const pushForce = new THREE.Vector3(14000, 0, 0); // 14 kN lateral impulse
-    const pushPoint = body.position.clone().add(new THREE.Vector3(0, 0.4, 0));
-    body.applyForceAtWorldPoint(pushForce, pushPoint);
+    pendingSidewaysPushRef.current = true;
   };
 
   // Rule E: Test Hook J — Rollover / Inverted test pose
@@ -219,6 +234,31 @@ export default function App() {
     const b = brakesRef.current;
     if (!b) return;
     b.config.absEnabled = !b.config.absEnabled;
+  };
+
+  // Toggle Low/High Transfer Case Range [L]
+  const toggleRangeCase = () => {
+    const dt = drivetrainRef.current;
+    const body = rigidBodyRef.current;
+    if (!dt || !body) return;
+    const bodyForward = SCRATCH_VEC3_A.set(0, 0, 1).applyQuaternion(body.quaternion);
+    const forwardSpeedMs = body.linearVelocity.dot(bodyForward);
+    const success = dt.toggleRange(forwardSpeedMs);
+    if (!success) {
+      showHudMessage('Stop to change range', 1500);
+    }
+  };
+
+  // Toggle Engine Ignition / Start [I]
+  const toggleIgnition = () => {
+    const eng = engineRef.current;
+    if (!eng) return;
+    eng.toggleIgnition();
+    if (eng.isRunning) {
+      showHudMessage('Engine Started', 1200);
+    } else {
+      showHudMessage('Engine Stopped', 1200);
+    }
   };
 
   const manualShiftUp = () => {
@@ -363,6 +403,14 @@ export default function App() {
           prevSpinAngle.current[i] = wheelsDyn[i].spinAngle;
         }
 
+        // Apply pending lateral push impulse (4,500 Ns applied at roof height 0.6m above body origin in +X direction)
+        if (pendingSidewaysPushRef.current) {
+          const pushForce = new THREE.Vector3(4500 / dt, 0, 0); // 540,000 N for dt = 1/120
+          const pushPoint = new THREE.Vector3(rigidBody.position.x, rigidBody.position.y + 0.6, rigidBody.position.z);
+          rigidBody.applyForceAtWorldPoint(pushForce, pushPoint);
+          pendingSidewaysPushRef.current = false;
+        }
+
         // =====================================================================
         // A. Steering Input & Ackermann Update
         // A / Left gives positive steer command (+1) => steering LEFT
@@ -388,21 +436,23 @@ export default function App() {
         aero.update(rigidBody);
 
         // =====================================================================
-        // C. Powertrain & Transmission Input Mapping
+        // C. Powertrain & Progressive Keyboard Throttle Mapping (120 Hz)
+        // Smoothly ramps up on hold (~0.7s to 1.0) and decays on release (~0.4s to 0.0)
+        // Zero per-frame allocations; delicate crawling precision.
         // =====================================================================
         const throttleKey = input.isDown('w') || input.isDown('arrowup');
         const brakeKey = input.isDown('s') || input.isDown('arrowdown');
         const handbrakePressed = input.isDown(' ');
 
-        let throttlePedal = 0;
+        let targetThrottle = 0;
         let brakePedal = 0;
 
         if (drivetrain.mode === 'auto') {
           // Automatic mode: S acts as brake when moving forward, or reverse when stopped
           if (drivetrain.currentGear >= 1) {
             // Forward gear
-            if (throttleKey) {
-              if (!drivetrain.isShifting) throttlePedal = 1.0;
+            if (throttleKey && !drivetrain.isShifting) {
+              targetThrottle = 1.0;
             }
             if (brakeKey) {
               if (forwardSpeedMs > 0.4) {
@@ -415,9 +465,9 @@ export default function App() {
               }
             }
           } else if (drivetrain.currentGear === -1) {
-            // Reverse gear
-            if (brakeKey) {
-              if (!drivetrain.isShifting) throttlePedal = 0.85; // Reverse accelerator
+            // Reverse gear: S is reverse accelerator
+            if (brakeKey && !drivetrain.isShifting) {
+              targetThrottle = 0.85;
             }
             if (throttleKey) {
               if (forwardSpeedMs < -0.4) {
@@ -436,9 +486,20 @@ export default function App() {
           }
         } else {
           // Manual mode: W is strictly throttle, S is strictly service brakes
-          if (throttleKey) throttlePedal = 1.0;
+          if (throttleKey) targetThrottle = 1.0;
           if (brakeKey) brakePedal = 1.0;
         }
+
+        // Progressive rate limiting in fixed 120 Hz timestep
+        const currentProgressive = progressiveThrottleRef.current;
+        if (targetThrottle > currentProgressive) {
+          const riseRate = 1.45; // ~0.7s from 0 to 1.0
+          progressiveThrottleRef.current = Math.min(targetThrottle, currentProgressive + riseRate * dt);
+        } else if (targetThrottle < currentProgressive) {
+          const decayRate = 2.50; // ~0.4s from 1.0 to 0.0
+          progressiveThrottleRef.current = Math.max(targetThrottle, currentProgressive - decayRate * dt);
+        }
+        const throttlePedal = progressiveThrottleRef.current;
 
         // =====================================================================
         // D. Transmission & Engine Dynamics Integration
@@ -454,6 +515,12 @@ export default function App() {
           drivetrain.targetDrivetrainRpm,
           dt
         );
+
+        // Check if engine newly stalled
+        if (engine.isStalled && !wasStalledRef.current) {
+          showHudMessage('Engine Stalled — Press [I] to Start', 2500);
+        }
+        wasStalledRef.current = engine.isStalled;
 
         // Second pass: compute driveshaft torque and split to driven wheels with final engine output
         drivetrain.update(engine, wheelsDyn, forwardSpeedMs, dt, false);
@@ -550,6 +617,12 @@ export default function App() {
         }
         if (input.wasJustPressed('b')) {
           toggleAbs();
+        }
+        if (input.wasJustPressed('l')) {
+          toggleRangeCase();
+        }
+        if (input.wasJustPressed('i')) {
+          toggleIgnition();
         }
 
         // =====================================================================
@@ -686,7 +759,11 @@ export default function App() {
             isShifting: drivetrain.isShifting,
             transmissionMode: drivetrain.mode,
             drivetrainLayout: drivetrain.layout,
+            rangeMode: drivetrain.rangeMode,
+            overallRatio: drivetrain.getOverallRatio(),
             clutchEngagement: drivetrain.clutchEngagement,
+            isEngineRunning: engine.isRunning,
+            isEngineStalled: engine.isStalled,
             absActive: [...brakes.absActive],
             absGlobalActive: brakes.absGlobalActive,
             absEnabled: brakes.config.absEnabled,
@@ -750,7 +827,10 @@ export default function App() {
         onApplyPush={applySidewaysPush}
         onToggleLayout={toggleLayout}
         onToggleTransMode={toggleTransmissionMode}
+        onToggleRange={toggleRangeCase}
         onToggleAbs={toggleAbs}
+        onToggleIgnition={toggleIgnition}
+        hudMessage={hudMessage}
         onShiftUp={manualShiftUp}
         onShiftDown={manualShiftDown}
       />

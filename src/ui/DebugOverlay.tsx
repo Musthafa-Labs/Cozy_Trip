@@ -8,7 +8,7 @@ import { WheelState } from '../vehicle/suspension';
 import { WheelDynamics } from '../vehicle/wheel';
 import { TestStation } from '../world/testGround';
 import { SURFACE_PACEJKA, SurfaceType } from '../vehicle/tire';
-import { DrivetrainLayout, TransmissionMode } from '../vehicle/drivetrain';
+import { DrivetrainLayout, TransmissionMode, RangeMode } from '../vehicle/drivetrain';
 
 export interface TelemetryData {
   speedKmh: number;
@@ -36,7 +36,7 @@ export interface TelemetryData {
   velocityDirDeg: number;   // deg (velocity direction angle)
   bodySideslipDeg: number;  // deg (body sideslip angle)
 
-  // STEP 4: Powertrain, Brakes, Aerodynamics
+  // Powertrain, Brakes, Aerodynamics & Transfer Case
   engineRpm: number;
   engineTorque: number;
   throttlePct: number;
@@ -46,7 +46,11 @@ export interface TelemetryData {
   isShifting: boolean;
   transmissionMode: TransmissionMode;
   drivetrainLayout: DrivetrainLayout;
+  rangeMode: RangeMode;      // 'high' | 'low'
+  overallRatio: number;      // dimensionless overall ratio
   clutchEngagement: number;  // 0 .. 1.0
+  isEngineRunning: boolean;  // diesel engine ignition/running state
+  isEngineStalled: boolean;  // diesel engine stall flag
   absActive: [boolean, boolean, boolean, boolean];
   absGlobalActive: boolean;
   absEnabled: boolean;
@@ -58,13 +62,16 @@ interface DebugOverlayProps {
   visible: boolean;
   onToggleVisible: () => void;
   telemetry: TelemetryData | null;
+  hudMessage?: string | null;
   onReset: () => void;
   onNextStation: () => void;
   onSelectStation: (index: number) => void;
   onApplyPush: () => void;
   onToggleLayout?: () => void;
   onToggleTransMode?: () => void;
+  onToggleRange?: () => void;
   onToggleAbs?: () => void;
+  onToggleIgnition?: () => void;
   onShiftUp?: () => void;
   onShiftDown?: () => void;
 }
@@ -73,13 +80,16 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
   visible,
   onToggleVisible,
   telemetry,
+  hudMessage,
   onReset,
   onNextStation,
   onSelectStation,
   onApplyPush,
   onToggleLayout,
   onToggleTransMode,
+  onToggleRange,
   onToggleAbs,
+  onToggleIgnition,
   onShiftUp,
   onShiftDown,
 }) => {
@@ -150,8 +160,6 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
     ctx.stroke();
   }, [visible, telemetry]);
 
-  if (!telemetry) return null;
-
   // Gear label helper
   const getGearLabel = (g: number): string => {
     if (g === -1) return 'R';
@@ -159,239 +167,298 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
     return `${g}`;
   };
 
-  const rpmProgress = Math.min(100, Math.max(0, ((telemetry.engineRpm - 800) / (7200 - 800)) * 100));
-  const isRedline = telemetry.engineRpm >= 6500;
-
   return (
     <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-between p-4 font-sans text-neutral-800 antialiased select-none">
+      {/* Temporary HUD Notification Message (e.g. "Stop to change range") */}
+      {hudMessage && (
+        <div className="pointer-events-none fixed top-18 left-1/2 -translate-x-1/2 z-50 animate-bounce">
+          <div className="flex items-center gap-2 rounded-xl border border-amber-500 bg-stone-900/95 px-5 py-2.5 shadow-2xl backdrop-blur-md">
+            <span className="text-amber-400 font-bold text-base">⚠️</span>
+            <span className="font-mono text-xs font-bold text-amber-200 uppercase tracking-wide">
+              {hudMessage}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Top Bar: Station Info & Powertrain HUD Cluster */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        {/* Left: Track info card */}
-        <div className="pointer-events-auto rounded-xl border border-stone-300/80 bg-stone-50/95 p-3.5 shadow-md backdrop-blur-md transition-all sm:max-w-md">
-          <div className="flex items-center justify-between gap-2 border-b border-stone-200 pb-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">
-              {telemetry.currentStation?.zone ?? 'Arena'} • Station {telemetry.stationIndex + 1}/{telemetry.totalStations}
-            </span>
-            <div className="flex items-center gap-1.5">
-              <span className="inline-block h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span className="text-[11px] font-semibold text-stone-600">120 Hz Pacejka MF</span>
-            </div>
-          </div>
-          <h2 className="mt-1.5 text-base font-semibold text-stone-900">{telemetry.currentStation?.name ?? 'Test Arena'}</h2>
-          <p className="mt-0.5 text-xs text-stone-600 leading-snug">
-            {telemetry.currentStation?.description ?? ''}
-          </p>
-
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            <button
-              onClick={onReset}
-              className="rounded-lg bg-stone-900 px-3 py-1 text-xs font-medium text-stone-100 shadow hover:bg-stone-800 active:scale-95 transition-all"
-            >
-              Reset [R]
-            </button>
-            <button
-              onClick={onNextStation}
-              className="rounded-lg border border-emerald-600 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-900 shadow-sm hover:bg-emerald-100 active:scale-95 transition-all"
-            >
-              Next Zone [T]
-            </button>
-            <button
-              onClick={onApplyPush}
-              className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-900 shadow-sm hover:bg-amber-100 active:scale-95 transition-all"
-            >
-              Lateral Push [P]
-            </button>
-          </div>
-        </div>
-
-        {/* Center: Live Powertrain Tachometer & Shifter Cluster */}
-        <div className="pointer-events-auto flex items-center gap-3 rounded-2xl border border-stone-300/85 bg-stone-50/95 px-4 py-2.5 shadow-lg backdrop-blur-md">
-          {/* Gear Indicator Badge */}
-          <div className="flex flex-col items-center">
-            <span className="text-[9px] font-bold uppercase text-stone-400">Gear</span>
-            <div className="relative flex items-center justify-center">
-              <div
-                className={`flex h-11 w-11 items-center justify-center rounded-xl font-mono text-xl font-black shadow-inner transition-colors ${
-                  telemetry.currentGear === -1
-                    ? 'bg-amber-600 text-white'
-                    : telemetry.currentGear === 0
-                    ? 'bg-stone-300 text-stone-700'
-                    : 'bg-stone-900 text-emerald-400'
-                }`}
-              >
-                {getGearLabel(telemetry.currentGear)}
+      {telemetry && (
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          {/* Left: Track info card */}
+          <div className="pointer-events-auto rounded-xl border border-stone-300/80 bg-stone-50/95 p-3.5 shadow-md backdrop-blur-md transition-all sm:max-w-md">
+            <div className="flex items-center justify-between gap-2 border-b border-stone-200 pb-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">
+                {telemetry.currentStation?.zone ?? 'Arena'} • Station {telemetry.stationIndex + 1}/{telemetry.totalStations}
+              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="inline-block h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span className="text-[11px] font-semibold text-stone-600">120 Hz Pacejka MF</span>
               </div>
-              {telemetry.isShifting && (
-                <span className="absolute -bottom-2 whitespace-nowrap rounded bg-amber-500 px-1 text-[8px] font-bold text-white shadow animate-pulse">
-                  SHIFT
-                </span>
-              )}
             </div>
-            {/* Manual shift buttons */}
-            <div className="mt-1 flex items-center gap-1">
+            <h2 className="mt-1.5 text-base font-semibold text-stone-900">{telemetry.currentStation?.name ?? 'Test Arena'}</h2>
+            <p className="mt-0.5 text-xs text-stone-600 leading-snug">
+              {telemetry.currentStation?.description ?? ''}
+            </p>
+
+            <div className="mt-3 flex flex-wrap gap-1.5">
               <button
-                onClick={onShiftDown}
-                title="Downshift [Q]"
-                className="h-4 w-4 rounded bg-stone-200 text-[10px] font-bold text-stone-700 hover:bg-stone-300 active:scale-95"
+                onClick={onReset}
+                className="rounded-lg bg-stone-900 px-3 py-1 text-xs font-medium text-stone-100 shadow hover:bg-stone-800 active:scale-95 transition-all"
               >
-                -
+                Reset [R]
               </button>
               <button
-                onClick={onShiftUp}
-                title="Upshift [E]"
-                className="h-4 w-4 rounded bg-stone-200 text-[10px] font-bold text-stone-700 hover:bg-stone-300 active:scale-95"
+                onClick={onNextStation}
+                className="rounded-lg border border-emerald-600 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-900 shadow-sm hover:bg-emerald-100 active:scale-95 transition-all"
               >
-                +
+                Next Zone [T]
+              </button>
+              <button
+                onClick={onApplyPush}
+                className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-900 shadow-sm hover:bg-amber-100 active:scale-95 transition-all"
+              >
+                Lateral Push [P]
               </button>
             </div>
           </div>
 
-          {/* Tachometer & Speed */}
-          <div className="flex flex-col justify-between min-w-[150px]">
-            <div className="flex items-baseline justify-between">
-              <div className="flex items-baseline gap-1">
-                <span className={`font-mono text-2xl font-black ${isRedline ? 'text-red-600 animate-pulse' : 'text-stone-900'}`}>
-                  {telemetry.engineRpm.toFixed(0)}
-                </span>
-                <span className="text-[10px] font-bold text-stone-400">RPM</span>
-              </div>
-              <div className="flex items-baseline gap-1">
-                <span className="font-mono text-lg font-bold text-stone-900">
-                  {telemetry.speedKmh.toFixed(1)}
-                </span>
-                <span className="text-[10px] font-semibold text-stone-500">km/h</span>
-              </div>
-            </div>
-
-            {/* Graphical RPM Bar */}
-            <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-stone-200">
-              <div
-                className={`h-full transition-all duration-75 ${
-                  isRedline ? 'bg-red-600' : telemetry.engineRpm > 4800 ? 'bg-amber-500' : 'bg-emerald-500'
-                }`}
-                style={{ width: `${rpmProgress}%` }}
-              />
-            </div>
-
-            <div className="mt-1 flex items-center justify-between text-[10px] text-stone-500 font-mono">
-              <span>Torque: {telemetry.engineTorque.toFixed(0)} N·m</span>
-              <span>Aero: -{telemetry.aeroDragN.toFixed(0)} N</span>
-            </div>
-          </div>
-
-          {/* Pedals & ABS / Layout Status Badges */}
-          <div className="flex flex-col gap-1.5 border-l border-stone-200 pl-3">
-            {/* Throttle & Brake Bars */}
-            <div className="flex items-center gap-1.5 text-[10px]">
-              <span className="w-5 text-stone-500 font-bold">THR</span>
-              <div className="h-1.5 w-14 overflow-hidden rounded-full bg-stone-200">
+          {/* Center: Live Powertrain Tachometer, Shifter & Transfer Case Cluster */}
+          <div className="pointer-events-auto flex items-center gap-3 rounded-2xl border border-stone-300/85 bg-stone-50/95 px-4 py-2.5 shadow-lg backdrop-blur-md">
+            {/* Gear & Range Indicator Badge (e.g. 1 HIGH, 1 LOW, R HIGH, R LOW) */}
+            <div className="flex flex-col items-center">
+              <span className="text-[9px] font-bold uppercase text-stone-400">Gear & Range</span>
+              <div className="relative flex items-center justify-center">
                 <div
-                  className="h-full bg-emerald-500 transition-all duration-75"
-                  style={{ width: `${telemetry.throttlePct}%` }}
+                  className={`flex h-11 min-w-[76px] px-2.5 items-center justify-center gap-1 rounded-xl font-mono shadow-inner transition-colors ${
+                    telemetry.currentGear === -1
+                      ? 'bg-amber-600 text-white'
+                      : telemetry.currentGear === 0
+                      ? 'bg-stone-300 text-stone-700'
+                      : 'bg-stone-900 text-emerald-400'
+                  }`}
+                >
+                  <span className="text-xl font-black">{getGearLabel(telemetry.currentGear)}</span>
+                  <span
+                    className={`rounded px-1 py-0.5 text-[10px] font-extrabold tracking-tight ${
+                      telemetry.rangeMode === 'low'
+                        ? 'bg-amber-500 text-white'
+                        : 'bg-stone-700 text-stone-200'
+                    }`}
+                  >
+                    {telemetry.rangeMode === 'low' ? 'LOW' : 'HIGH'}
+                  </span>
+                </div>
+                {telemetry.isShifting && (
+                  <span className="absolute -bottom-2 whitespace-nowrap rounded bg-amber-500 px-1 text-[8px] font-bold text-white shadow animate-pulse">
+                    SHIFT
+                  </span>
+                )}
+              </div>
+              {/* Manual shift buttons */}
+              <div className="mt-1 flex items-center gap-1">
+                <button
+                  onClick={onShiftDown}
+                  title="Downshift [Q]"
+                  className="h-4 w-4 rounded bg-stone-200 text-[10px] font-bold text-stone-700 hover:bg-stone-300 active:scale-95"
+                >
+                  -
+                </button>
+                <button
+                  onClick={onShiftUp}
+                  title="Upshift [E]"
+                  className="h-4 w-4 rounded bg-stone-200 text-[10px] font-bold text-stone-700 hover:bg-stone-300 active:scale-95"
+                >
+                  +
+                </button>
+              </div>
+            </div>
+
+            {/* Tachometer, Ratio & Speed */}
+            <div className="flex flex-col justify-between min-w-[170px]">
+              <div className="flex items-baseline justify-between">
+                <div className="flex items-baseline gap-1.5">
+                  <span
+                    className={`font-mono text-2xl font-black ${
+                      telemetry.isEngineStalled
+                        ? 'text-red-600'
+                        : telemetry.engineRpm >= 4200
+                        ? 'text-red-600 animate-pulse'
+                        : 'text-stone-900'
+                    }`}
+                  >
+                    {telemetry.engineRpm.toFixed(0)}
+                  </span>
+                  <span className="text-[10px] font-bold text-stone-400">RPM</span>
+                  {telemetry.isEngineStalled && (
+                    <button
+                      onClick={onToggleIgnition}
+                      title="Click to start engine [I]"
+                      className="rounded bg-red-600 px-1.5 py-0.5 text-[9px] font-extrabold text-white uppercase tracking-wider animate-pulse hover:bg-red-700 active:scale-95"
+                    >
+                      STALLED [I]
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-baseline gap-1">
+                  <span className="font-mono text-lg font-bold text-stone-900">
+                    {telemetry.speedKmh.toFixed(1)}
+                  </span>
+                  <span className="text-[10px] font-semibold text-stone-500">km/h</span>
+                </div>
+              </div>
+
+              {/* Graphical RPM Bar scaled to Diesel 4800 RPM max */}
+              <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-stone-200">
+                <div
+                  className={`h-full transition-all duration-75 ${
+                    telemetry.isEngineStalled
+                      ? 'bg-red-600'
+                      : telemetry.engineRpm >= 4200
+                      ? 'bg-red-600'
+                      : telemetry.engineRpm > 3600
+                      ? 'bg-amber-500'
+                      : 'bg-emerald-500'
+                  }`}
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.max(0, (telemetry.engineRpm / 4800) * 100)
+                    )}%`,
+                  }}
                 />
               </div>
-              <span className="w-6 font-mono text-[9px] text-stone-700">{telemetry.throttlePct.toFixed(0)}%</span>
-            </div>
 
-            <div className="flex items-center gap-1.5 text-[10px]">
-              <span className="w-5 text-stone-500 font-bold">BRK</span>
-              <div className="h-1.5 w-14 overflow-hidden rounded-full bg-stone-200">
-                <div
-                  className="h-full bg-red-500 transition-all duration-75"
-                  style={{ width: `${telemetry.brakePct}%` }}
-                />
+              <div className="mt-1 flex items-center justify-between text-[10px] text-stone-500 font-mono">
+                <span title="Overall Transmission Ratio">Ratio: {telemetry.overallRatio.toFixed(2)}</span>
+                <span>Torque: {telemetry.engineTorque.toFixed(0)} N·m</span>
               </div>
-              <span className="w-6 font-mono text-[9px] text-stone-700">{telemetry.brakePct.toFixed(0)}%</span>
             </div>
 
-            {/* Layout, Mode & ABS Buttons */}
-            <div className="flex items-center gap-1 mt-0.5">
-              <button
-                onClick={onToggleLayout}
-                title="Toggle Drivetrain Layout [G]"
-                className={`rounded px-1.5 py-0.5 text-[10px] font-bold transition-all ${
-                  telemetry.drivetrainLayout === 'AWD'
-                    ? 'bg-emerald-600 text-white'
-                    : telemetry.drivetrainLayout === 'RWD'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-purple-600 text-white'
-                }`}
-              >
-                {telemetry.drivetrainLayout}
-              </button>
-              <button
-                onClick={onToggleTransMode}
-                title="Toggle Auto/Manual [M]"
-                className="rounded bg-stone-200 px-1.5 py-0.5 text-[10px] font-bold text-stone-700 hover:bg-stone-300"
-              >
-                {telemetry.transmissionMode === 'auto' ? 'AUTO' : 'MANUAL'}
-              </button>
-              <button
-                onClick={onToggleAbs}
-                title="Toggle ABS [B]"
-                className={`rounded px-1.5 py-0.5 text-[10px] font-bold transition-all ${
-                  !telemetry.absEnabled
-                    ? 'bg-stone-200 text-stone-400 line-through'
-                    : telemetry.absGlobalActive
-                    ? 'bg-amber-500 text-white animate-pulse'
-                    : 'bg-stone-800 text-stone-100'
-                }`}
-              >
-                ABS
-              </button>
+            {/* Pedals & Controls (Layout, Mode, Range, ABS) */}
+            <div className="flex flex-col gap-1.5 border-l border-stone-200 pl-3">
+              {/* Throttle & Brake Bars */}
+              <div className="flex items-center gap-1.5 text-[10px]">
+                <span className="w-5 text-stone-500 font-bold">THR</span>
+                <div className="h-1.5 w-14 overflow-hidden rounded-full bg-stone-200">
+                  <div
+                    className="h-full bg-emerald-500 transition-all duration-75"
+                    style={{ width: `${telemetry.throttlePct}%` }}
+                  />
+                </div>
+                <span className="w-6 font-mono text-[9px] text-stone-700">{telemetry.throttlePct.toFixed(0)}%</span>
+              </div>
+
+              <div className="flex items-center gap-1.5 text-[10px]">
+                <span className="w-5 text-stone-500 font-bold">BRK</span>
+                <div className="h-1.5 w-14 overflow-hidden rounded-full bg-stone-200">
+                  <div
+                    className="h-full bg-red-500 transition-all duration-75"
+                    style={{ width: `${telemetry.brakePct}%` }}
+                  />
+                </div>
+                <span className="w-6 font-mono text-[9px] text-stone-700">{telemetry.brakePct.toFixed(0)}%</span>
+              </div>
+
+              {/* Layout, Mode, Transfer Case Range & ABS Buttons */}
+              <div className="flex items-center gap-1 mt-0.5">
+                <button
+                  onClick={onToggleLayout}
+                  title="Toggle Drivetrain Layout [G]"
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-bold transition-all ${
+                    telemetry.drivetrainLayout === 'AWD'
+                      ? 'bg-emerald-600 text-white'
+                      : telemetry.drivetrainLayout === 'RWD'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-purple-600 text-white'
+                  }`}
+                >
+                  {telemetry.drivetrainLayout}
+                </button>
+                <button
+                  onClick={onToggleTransMode}
+                  title="Toggle Auto/Manual [M]"
+                  className="rounded bg-stone-200 px-1.5 py-0.5 text-[10px] font-bold text-stone-700 hover:bg-stone-300"
+                >
+                  {telemetry.transmissionMode === 'auto' ? 'AUTO' : 'MANUAL'}
+                </button>
+                <button
+                  onClick={onToggleRange}
+                  title="Toggle Low/High Range Transfer Case [L]"
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-bold transition-all ${
+                    telemetry.rangeMode === 'low'
+                      ? 'bg-amber-600 text-white font-extrabold shadow-sm'
+                      : 'bg-stone-200 text-stone-700 hover:bg-stone-300'
+                  }`}
+                >
+                  {telemetry.rangeMode === 'low' ? 'LOW' : 'HIGH'} [L]
+                </button>
+                <button
+                  onClick={onToggleAbs}
+                  title="Toggle ABS [B]"
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-bold transition-all ${
+                    !telemetry.absEnabled
+                      ? 'bg-stone-200 text-stone-400 line-through'
+                      : telemetry.absGlobalActive
+                      ? 'bg-amber-500 text-white animate-pulse'
+                      : 'bg-stone-800 text-stone-100'
+                  }`}
+                >
+                  ABS
+                </button>
+              </div>
             </div>
           </div>
-        </div>
 
-        {/* Top Right Controls & Toggle */}
-        <div className="pointer-events-auto flex items-center gap-2">
-          {/* Active Steer Command Badge */}
-          <div className="flex items-center gap-1.5 rounded-xl border border-stone-300/80 bg-stone-50/90 px-3 py-1.5 shadow-sm text-xs backdrop-blur-md">
-            <span className="text-[11px] font-semibold text-stone-500">Steer Cmd:</span>
-            <span
-              className={`rounded px-2 py-0.5 font-bold font-mono text-xs ${
-                telemetry.steerCmd === 'LEFT'
-                  ? 'bg-blue-600 text-white animate-pulse'
-                  : telemetry.steerCmd === 'RIGHT'
-                  ? 'bg-orange-600 text-white animate-pulse'
-                  : 'bg-stone-200 text-stone-600'
+          {/* Top Right Controls & Toggle */}
+          <div className="pointer-events-auto flex items-center gap-2">
+            {/* Active Steer Command Badge */}
+            <div className="flex items-center gap-1.5 rounded-xl border border-stone-300/80 bg-stone-50/90 px-3 py-1.5 shadow-sm text-xs backdrop-blur-md">
+              <span className="text-[11px] font-semibold text-stone-500">Steer Cmd:</span>
+              <span
+                className={`rounded px-2 py-0.5 font-bold font-mono text-xs ${
+                  telemetry.steerCmd === 'LEFT'
+                    ? 'bg-blue-600 text-white animate-pulse'
+                    : telemetry.steerCmd === 'RIGHT'
+                    ? 'bg-orange-600 text-white animate-pulse'
+                    : 'bg-stone-200 text-stone-600'
+                }`}
+              >
+                {telemetry.steerCmd}
+              </span>
+            </div>
+
+            <div className="hidden sm:flex items-center gap-1.5 rounded-xl border border-stone-300/80 bg-stone-50/90 px-3 py-1.5 shadow-sm text-xs backdrop-blur-md">
+              <span
+                className={`rounded px-1.5 py-0.5 font-bold ${
+                  telemetry.handbrakeActive ? 'bg-amber-600 text-white animate-pulse' : 'bg-stone-200 text-stone-500'
+                }`}
+              >
+                Space: Handbrake
+              </span>
+            </div>
+
+            <button
+              onClick={onToggleVisible}
+              className={`rounded-lg px-3 py-1.5 text-xs font-semibold shadow-md backdrop-blur-md transition-all ${
+                visible
+                  ? 'border border-stone-400 bg-stone-900 text-stone-50'
+                  : 'border border-stone-300 bg-white/90 text-stone-700 hover:bg-stone-50'
               }`}
             >
-              {telemetry.steerCmd}
-            </span>
+              {visible ? 'Hide Telemetry [F3]' : 'Show Telemetry [F3]'}
+            </button>
           </div>
-
-          <div className="hidden sm:flex items-center gap-1.5 rounded-xl border border-stone-300/80 bg-stone-50/90 px-3 py-1.5 shadow-sm text-xs backdrop-blur-md">
-            <span
-              className={`rounded px-1.5 py-0.5 font-bold ${
-                telemetry.handbrakeActive ? 'bg-amber-600 text-white animate-pulse' : 'bg-stone-200 text-stone-500'
-              }`}
-            >
-              Space: Handbrake
-            </span>
-          </div>
-
-          <button
-            onClick={onToggleVisible}
-            className={`rounded-lg px-3 py-1.5 text-xs font-semibold shadow-md backdrop-blur-md transition-all ${
-              visible
-                ? 'border border-stone-400 bg-stone-900 text-stone-50'
-                : 'border border-stone-300 bg-white/90 text-stone-700 hover:bg-stone-50'
-            }`}
-          >
-            {visible ? 'Hide Telemetry [F3]' : 'Show Telemetry [F3]'}
-          </button>
         </div>
-      </div>
+      )}
 
       {/* Main Telemetry Panel (F3) */}
-      {visible && (
+      {visible && telemetry && (
         <div className="pointer-events-auto mt-auto mb-2 flex flex-wrap items-end gap-3 max-h-[85vh] overflow-y-auto">
           {/* Chassis State & FIX 1b Kinematics */}
           <div className="w-76 rounded-xl border border-stone-300/80 bg-stone-50/95 p-3 shadow-lg backdrop-blur-md">
             <div className="flex items-center justify-between border-b border-stone-200 pb-1">
               <h3 className="text-xs font-bold uppercase tracking-wider text-stone-500">Chassis Kinematics</h3>
-              <span className="text-[10px] font-bold text-emerald-700">Step 4 Powertrain</span>
+              <span className="text-[10px] font-bold text-emerald-700">Drivetrain & Ratio</span>
             </div>
 
             <div className="mt-2 grid grid-cols-2 gap-1.5 text-xs">
@@ -450,9 +517,15 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
               </div>
             </div>
 
-            {/* Aerodynamic forces readout */}
+            {/* Drivetrain overall ratio and aerodynamic forces readout */}
             <div className="mt-2 rounded-lg bg-stone-100/80 p-1.5 text-[10px] border border-stone-200">
               <div className="flex justify-between text-stone-700">
+                <span>Overall Ratio:</span>
+                <b className="font-mono text-stone-900">
+                  {telemetry.overallRatio.toFixed(2)} ({telemetry.rangeMode.toUpperCase()})
+                </b>
+              </div>
+              <div className="flex justify-between text-stone-700 mt-0.5">
                 <span>Aero Drag (v²):</span>
                 <b className="font-mono text-stone-900">-{telemetry.aeroDragN.toFixed(0)} N</b>
               </div>
@@ -625,6 +698,12 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
                   Mode [M]
                 </button>
                 <button
+                  onClick={onToggleRange}
+                  className="rounded bg-stone-200 px-2 py-0.5 font-medium text-stone-700 hover:bg-stone-300"
+                >
+                  Range [L]
+                </button>
+                <button
                   onClick={onToggleAbs}
                   className="rounded bg-stone-200 px-2 py-0.5 font-medium text-stone-700 hover:bg-stone-300"
                 >
@@ -658,11 +737,17 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
           <span className="rounded bg-stone-200/80 px-2 py-0.5 font-mono text-[11px] text-stone-800">
             [M] Auto/Manual
           </span>
+          <span className="rounded bg-amber-100 px-2 py-0.5 font-mono text-[11px] text-amber-900 font-bold border border-amber-300">
+            [L] Range High/Low
+          </span>
           <span className="rounded bg-stone-200/80 px-2 py-0.5 font-mono text-[11px] text-stone-800">
             [G] AWD/RWD/FWD
           </span>
           <span className="rounded bg-stone-200/80 px-2 py-0.5 font-mono text-[11px] text-stone-800">
             [B] ABS On/Off
+          </span>
+          <span className="rounded bg-rose-100 px-2 py-0.5 font-mono text-[11px] text-rose-900 font-bold border border-rose-300">
+            [I] Ignition
           </span>
           <span className="rounded bg-stone-200/80 px-2 py-0.5 font-mono text-[11px] text-stone-800">
             [R] Reset

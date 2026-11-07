@@ -9,11 +9,14 @@ import { WheelDynamics } from './wheel';
 
 export type DrivetrainLayout = 'AWD' | 'RWD' | 'FWD';
 export type TransmissionMode = 'auto' | 'manual';
+export type RangeMode = 'high' | 'low';
 
 export interface TransmissionConfig {
   gearRatios: number[];      // Index: 0 = Neutral, 1 = 1st, ..., 6 = 6th
   reverseRatio: number;      // Reverse gear ratio (negative, e.g. -3.75)
   finalDriveRatio: number;   // Final drive ratio (differential ring & pinion, e.g. 3.91)
+  lowRangeRatio: number;     // Low range transfer case multiplier (default: 2.5)
+  lowRangeMaxGear: number;   // Highest forward gear selectable in low range (default: 4)
   drivetrainEfficiency: number; // Mechanical efficiency (e.g. 0.92)
   shiftDuration: number;     // Gear change shift time in seconds (e.g. 0.22 s)
   minShiftInterval: number;  // Minimum time between completed automatic shifts in seconds (default: 1.0 s)
@@ -30,11 +33,13 @@ export const DEFAULT_TRANSMISSION_CONFIG: TransmissionConfig = {
   gearRatios: [0, 3.98, 2.61, 1.82, 1.37, 1.00, 0.81],
   reverseRatio: -3.75,
   finalDriveRatio: 3.91,
+  lowRangeRatio: 2.5,
+  lowRangeMaxGear: 4,
   drivetrainEfficiency: 0.92,
   shiftDuration: 0.22,
   minShiftInterval: 1.0,
-  clutchEngageStartRpm: 1050,
-  clutchEngageLockRpm: 2100,
+  clutchEngageStartRpm: 850,
+  clutchEngageLockRpm: 1600,
   clutchMaxTorqueCapacity: 650,
   differentialType: 'lsd',
   lsdStiffness: 50.0,
@@ -47,6 +52,7 @@ export class Drivetrain {
   // Configuration
   public layout: DrivetrainLayout = 'AWD';
   public mode: TransmissionMode = 'auto';
+  public rangeMode: RangeMode = 'high';
   public minShiftInterval: number = 1.0;
   public timeSinceShift: number = 10.0; // Initialized so first shift has no delay
 
@@ -73,6 +79,7 @@ export class Drivetrain {
   }
 
   public reset(): void {
+    this.rangeMode = 'high';
     this.currentGear = 1;
     this.targetGear = 1;
     this.isShifting = false;
@@ -86,23 +93,45 @@ export class Drivetrain {
   }
 
   /**
-   * Returns the current overall gear ratio (gearbox * finalDrive).
+   * Single source-of-truth function for overall transmission ratio:
+   * gearRatio * finalDriveRatio * (rangeMode === 'low' ? lowRangeRatio : 1)
+   * Handles forward gears, reverse, driveshaft torque, target RPM, and clutch calculations.
    */
-  public getOverallRatio(): number {
-    if (this.currentGear === 0) return 0;
-    if (this.currentGear === -1) return this.config.reverseRatio * this.config.finalDriveRatio;
-    const gRatio = this.config.gearRatios[this.currentGear] ?? 1.0;
-    return gRatio * this.config.finalDriveRatio;
+  public getOverallRatio(gear: number = this.currentGear): number {
+    if (gear === 0) return 0;
+    const baseGearRatio = gear === -1 ? this.config.reverseRatio : (this.config.gearRatios[gear] ?? 1.0);
+    const rangeMultiplier = this.rangeMode === 'low' ? this.config.lowRangeRatio : 1.0;
+    return baseGearRatio * this.config.finalDriveRatio * rangeMultiplier;
   }
 
   /**
-   * Request shifting to a specific gear with safety checks.
+   * Toggles between HIGH and LOW transfer case range.
+   * Switching is permitted only when absolute longitudinal speed is < 1.0 m/s.
+   * If transitioning into LOW while in a gear above lowRangeMaxGear, clamps to lowRangeMaxGear.
+   */
+  public toggleRange(forwardSpeedMs: number): boolean {
+    if (Math.abs(forwardSpeedMs) >= 1.0) {
+      return false;
+    }
+    this.rangeMode = this.rangeMode === 'high' ? 'low' : 'high';
+    if (this.rangeMode === 'low' && this.currentGear > this.config.lowRangeMaxGear) {
+      this.currentGear = this.config.lowRangeMaxGear;
+      this.targetGear = this.config.lowRangeMaxGear;
+      this.isShifting = false;
+      this.shiftProgress = 0;
+    }
+    return true;
+  }
+
+  /**
+   * Request shifting to a specific gear with safety checks and low-range limit enforcement.
    */
   public requestGear(gear: number, forwardSpeedMs: number, engineRpm: number): boolean {
     if (gear < -1 || gear > 6) return false;
+    if (this.rangeMode === 'low' && gear > this.config.lowRangeMaxGear) return false;
     if (gear === this.currentGear) return true;
 
-    // Safety: prevent selecting reverse if moving forward at > 2.5 km/h
+    // Safety: prevent selecting reverse if moving forward at > 2.5 km/h (0.7 m/s)
     if (gear === -1 && forwardSpeedMs > 0.7) {
       return false;
     }
@@ -112,13 +141,15 @@ export class Drivetrain {
       return false;
     }
 
-    // Safety: prevent downshift over-rev (where new gear would push RPM > 6800)
+    // Safety: prevent downshift over-rev (where new gear would push RPM > 4300)
     if (gear > 0 && gear < this.currentGear) {
-      const currentRatio = this.config.gearRatios[this.currentGear] ?? 1.0;
-      const newRatio = this.config.gearRatios[gear] ?? 1.0;
-      const projectedRpm = (engineRpm * newRatio) / currentRatio;
-      if (projectedRpm > 6800) {
-        return false;
+      const currentOverall = this.getOverallRatio(this.currentGear);
+      const newOverall = this.getOverallRatio(gear);
+      if (Math.abs(currentOverall) > 0.001) {
+        const projectedRpm = (engineRpm * newOverall) / currentOverall;
+        if (projectedRpm > 4300) {
+          return false;
+        }
       }
     }
 
@@ -130,7 +161,8 @@ export class Drivetrain {
 
   public shiftUp(forwardSpeedMs: number, engineRpm: number): boolean {
     if (this.currentGear === -1) return this.requestGear(1, forwardSpeedMs, engineRpm);
-    if (this.currentGear >= 6) return false;
+    const maxGear = this.rangeMode === 'low' ? this.config.lowRangeMaxGear : 6;
+    if (this.currentGear >= maxGear) return false;
     return this.requestGear(this.currentGear + 1, forwardSpeedMs, engineRpm);
   }
 
@@ -160,22 +192,21 @@ export class Drivetrain {
     }
 
     if (this.currentGear >= 1) {
-      // Throttle-dependent shift points
-      // Light throttle shifts early for fuel economy / lo-fi calm cruise (3200 RPM)
-      // Heavy throttle holds gears up to 5800-6200 RPM for acceleration
-      const upshiftThreshold = lerp(3200, 6000, throttle);
-      const downshiftThreshold = lerp(1600, 3600, throttle);
+      // Diesel-adapted shift points: cruise at 1850-2400 RPM, peak power shift at 3800 RPM
+      const upshiftThreshold = lerp(1850, 3800, throttle);
+      const downshiftThreshold = lerp(1100, 2200, throttle);
 
-      const currentGearRatio = this.config.gearRatios[this.currentGear];
-      if (!currentGearRatio || Math.abs(currentGearRatio) < 0.001) return;
+      const maxAllowedGear = this.rangeMode === 'low' ? this.config.lowRangeMaxGear : 6;
+      const currentRatio = this.getOverallRatio(this.currentGear);
+      if (Math.abs(currentRatio) < 0.001) return;
 
-      // Upshift condition: single gear, next forward gear exists
-      if (this.currentGear < 6 && engineRpm > upshiftThreshold) {
+      // Upshift condition: single gear, next forward gear exists within range limits
+      if (this.currentGear < maxAllowedGear && engineRpm > upshiftThreshold) {
         const nextGear = this.currentGear + 1;
-        const nextGearRatio = this.config.gearRatios[nextGear];
-        if (nextGearRatio) {
-          const predictedRpm = (engineRpm * nextGearRatio) / currentGearRatio;
-          if (predictedRpm >= downshiftThreshold + 600) {
+        const nextRatio = this.getOverallRatio(nextGear);
+        if (Math.abs(nextRatio) > 0.001) {
+          const predictedRpm = (engineRpm * nextRatio) / currentRatio;
+          if (predictedRpm >= downshiftThreshold + 300) {
             this.requestGear(nextGear, forwardSpeedMs, engineRpm);
             return;
           }
@@ -185,10 +216,10 @@ export class Drivetrain {
       // Downshift condition: single gear, lower forward gear exists
       if (this.currentGear > 1 && engineRpm < downshiftThreshold) {
         const lowerGear = this.currentGear - 1;
-        const lowerGearRatio = this.config.gearRatios[lowerGear];
-        if (lowerGearRatio) {
-          const predictedRpm = (engineRpm * lowerGearRatio) / currentGearRatio;
-          if (predictedRpm <= upshiftThreshold - 600 && predictedRpm < 6500) {
+        const lowerRatio = this.getOverallRatio(lowerGear);
+        if (Math.abs(lowerRatio) > 0.001) {
+          const predictedRpm = (engineRpm * lowerRatio) / currentRatio;
+          if (predictedRpm <= upshiftThreshold - 300 && predictedRpm < 4200) {
             this.requestGear(lowerGear, forwardSpeedMs, engineRpm);
             return;
           }
@@ -250,20 +281,42 @@ export class Drivetrain {
       this.targetDrivetrainRpm = engine.config.idleRpm;
     }
 
-    // 3. Automatic Clutch Modulation
-    // Clutch engagement depends on RPM, shift state, and neutral/reverse
+    // 3. Clutch Modulation
+    // Clutch engagement depends on RPM, shift state, transmission mode, and vehicle speed
     if (this.currentGear === 0 || this.isShifting) {
       // Neutral or mid-shift: clutch is released / slipping
       this.clutchEngagement = this.isShifting ? 0.15 : 0.0;
-    } else {
-      // In gear: progressive engagement between start RPM (1050) and lockup RPM (2100)
+    } else if (this.mode === 'auto') {
+      // Automatic Mode: fluid coupling / auto-clutch
+      // Progressive engagement between start RPM (850) and lockup RPM (1600)
       const lockupRange = this.config.clutchEngageLockRpm - this.config.clutchEngageStartRpm;
       const rawEngagement = (engine.rpm - this.config.clutchEngageStartRpm) / lockupRange;
       this.clutchEngagement = clamp(rawEngagement, 0, 1.0);
 
-      // If vehicle is moving at reasonable speed in gear, clutch stays locked
-      if (Math.abs(forwardSpeedMs) > 2.0 && engine.rpm > engine.config.idleRpm + 150) {
+      // If vehicle is rolling at speed in gear, clutch stays locked
+      if (Math.abs(forwardSpeedMs) > 1.8 && engine.rpm > engine.config.idleRpm + 100) {
         this.clutchEngagement = Math.max(this.clutchEngagement, 0.95);
+      }
+    } else {
+      // Manual Mode:
+      // In manual mode, the clutch is mechanically coupled without automatic disengagement.
+      if (Math.abs(forwardSpeedMs) > 1.5) {
+        // While moving in gear, clutch remains firmly locked
+        this.clutchEngagement = 1.0;
+      } else {
+        // Near standstill in manual gear:
+        const isLowLaunchGear = this.currentGear === 1 || this.currentGear === -1 || (this.rangeMode === 'low' && this.currentGear <= 2);
+        if (isLowLaunchGear) {
+          const lockupRange = this.config.clutchEngageLockRpm - this.config.clutchEngageStartRpm;
+          const rawEngagement = (engine.rpm - this.config.clutchEngageStartRpm) / lockupRange;
+          // In 1st gear manual: clutch bites at minimum 0.25. If brakes held or stationary without throttle,
+          // targetDrivetrainRpm is 0, so driveline drag pulls engine below 450 RPM and stalls!
+          this.clutchEngagement = clamp(rawEngagement, 0.25, 1.0);
+        } else {
+          // Attempting to move or stopped in 2nd, 3rd, 4th, etc. in manual mode:
+          // Heavy clutch load (0.80) lugs the engine immediately below stall threshold
+          this.clutchEngagement = 0.80;
+        }
       }
     }
 
@@ -281,7 +334,7 @@ export class Drivetrain {
     }
 
     // 5. Driveshaft Torque Multiplication
-    // T_driveshaft = T_engine * gearRatio * finalDrive * efficiency
+    // T_driveshaft = T_engine * gearRatio * finalDrive * rangeMultiplier * efficiency
     this.driveshaftTorque = transmittedTorque * overallRatio * this.config.drivetrainEfficiency;
 
     // Safety: no driveshaft torque in neutral or at zero throttle standstill

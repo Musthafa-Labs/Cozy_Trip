@@ -11,37 +11,47 @@ export interface TorqueCurvePoint {
 }
 
 export interface EngineConfig {
-  idleRpm: number;           // Idle speed in RPM (default: 900)
-  peakTorqueRpm: number;     // RPM of peak torque (default: 4500)
-  redlineRpm: number;        // Maximum allowed RPM (default: 7000)
-  revLimiterCutRpm: number;  // Hard cut threshold (default: 7000)
-  revLimiterResumeRpm: number; // Threshold to resume fuel injection (default: 6850)
-  inertia: number;           // Engine flywheel + rotating assembly inertia in kg*m^2 (default: 0.20)
+  idleRpm: number;           // Idle speed in RPM (default: 750)
+  stallRpm: number;          // Stall threshold in RPM (default: 450)
+  peakTorqueRpm: number;     // RPM of peak torque (default: 2000)
+  redlineRpm: number;        // Maximum allowed RPM (default: 4400)
+  revLimiterCutRpm: number;  // Hard cut threshold (default: 4400)
+  revLimiterResumeRpm: number; // Threshold to resume fuel injection (default: 4250)
+  inertia: number;           // Engine flywheel + rotating assembly inertia in kg*m^2 (default: 0.35)
   throttleResponseTau: number; // 1st-order throttle response filter time constant in seconds (default: 0.08)
-  engineBrakingBase: number; // Base engine friction braking in N*m (default: 18.0)
-  engineBrakingRpmFactor: number; // Speed-dependent engine braking factor N*m/RPM (default: 0.016)
+  engineBrakingBase: number; // Base engine friction braking in N*m (default: 28.0)
+  engineBrakingRpmFactor: number; // Speed-dependent engine braking factor N*m/RPM (default: 0.022)
   torqueCurve: TorqueCurvePoint[]; // Piecewise torque curve points
 }
 
-// Vintage 4.0L Inline-6 / V8 off-road engine profile
+// Heavy-duty 4.2L Turbo-Diesel inline-6 expedition engine profile
+// Characterized by strong low-end torque, flat peak plateau around 1800-2400 RPM,
+// smooth tapering off at higher revs, and governed fuel cut at 4400 RPM.
 export const DEFAULT_TORQUE_CURVE: TorqueCurvePoint[] = [
-  { rpm: 0, torque: 180 },
-  { rpm: 900, torque: 240 },
-  { rpm: 1800, torque: 320 },
-  { rpm: 3000, torque: 385 },
-  { rpm: 4500, torque: 420 }, // Peak torque ~4500 RPM
-  { rpm: 5500, torque: 380 },
-  { rpm: 6500, torque: 310 },
-  { rpm: 7000, torque: 260 }, // Redline 7000 RPM
-  { rpm: 7500, torque: 180 },
+  { rpm: 0, torque: 220 },
+  { rpm: 500, torque: 310 },
+  { rpm: 750, torque: 360 },   // Healthy idle torque reserve
+  { rpm: 1200, torque: 430 },
+  { rpm: 1800, torque: 480 },  // Peak torque plateau begins
+  { rpm: 2200, torque: 480 },  // Peak torque plateau
+  { rpm: 2600, torque: 460 },
+  { rpm: 3200, torque: 400 },
+  { rpm: 3800, torque: 320 },
+  { rpm: 4200, torque: 220 },
+  { rpm: 4400, torque: 150 },  // Redline / governor threshold
+  { rpm: 4800, torque: 40 },
 ];
 
 export class Engine {
   public readonly config: EngineConfig;
 
-  // State
-  public rpm: number = 900;
-  public omega: number = (900 * 2 * Math.PI) / 60; // rad/s
+  // Running & Stall State
+  public isRunning: boolean = true;
+  public isStalled: boolean = false;
+
+  // Kinematic & Dynamic State
+  public rpm: number = 750;
+  public omega: number = (750 * 2 * Math.PI) / 60; // rad/s
   public throttle: number = 0;                     // Smoothed throttle [0 .. 1.0]
   public outputTorque: number = 0;                 // Net output torque at flywheel (N*m)
   public rawCombustionTorque: number = 0;          // Gross combustion torque (N*m)
@@ -50,15 +60,16 @@ export class Engine {
 
   constructor(config: Partial<EngineConfig> = {}) {
     this.config = {
-      idleRpm: config.idleRpm ?? 900,
-      peakTorqueRpm: config.peakTorqueRpm ?? 4500,
-      redlineRpm: config.redlineRpm ?? 7000,
-      revLimiterCutRpm: config.revLimiterCutRpm ?? 7000,
-      revLimiterResumeRpm: config.revLimiterResumeRpm ?? 6850,
-      inertia: config.inertia ?? 0.20,
+      idleRpm: config.idleRpm ?? 750,
+      stallRpm: config.stallRpm ?? 450,
+      peakTorqueRpm: config.peakTorqueRpm ?? 2000,
+      redlineRpm: config.redlineRpm ?? 4400,
+      revLimiterCutRpm: config.revLimiterCutRpm ?? 4400,
+      revLimiterResumeRpm: config.revLimiterResumeRpm ?? 4250,
+      inertia: config.inertia ?? 0.35,
       throttleResponseTau: config.throttleResponseTau ?? 0.08,
-      engineBrakingBase: config.engineBrakingBase ?? 18.0,
-      engineBrakingRpmFactor: config.engineBrakingRpmFactor ?? 0.016,
+      engineBrakingBase: config.engineBrakingBase ?? 28.0,
+      engineBrakingRpmFactor: config.engineBrakingRpmFactor ?? 0.022,
       torqueCurve: config.torqueCurve ?? DEFAULT_TORQUE_CURVE,
     };
 
@@ -66,14 +77,45 @@ export class Engine {
     this.omega = (this.rpm * 2 * Math.PI) / 60;
   }
 
-  public reset(): void {
+  /**
+   * Starts the engine (ignition on, initial idle speed).
+   */
+  public start(): void {
+    this.isRunning = true;
+    this.isStalled = false;
     this.rpm = this.config.idleRpm;
     this.omega = (this.rpm * 2 * Math.PI) / 60;
-    this.throttle = 0;
     this.outputTorque = 0;
     this.rawCombustionTorque = 0;
-    this.engineBrakingTorque = 0;
     this.isRevLimiterActive = false;
+  }
+
+  /**
+   * Stalls or shuts off the engine (combustion terminates, no driving torque produced).
+   */
+  public stall(): void {
+    this.isRunning = false;
+    this.isStalled = true;
+    this.outputTorque = 0;
+    this.rawCombustionTorque = 0;
+    this.isRevLimiterActive = false;
+  }
+
+  /**
+   * Toggles engine ignition state (starts if stopped/stalled; turns off if running).
+   */
+  public toggleIgnition(): void {
+    if (this.isRunning) {
+      this.stall();
+    } else {
+      this.start();
+    }
+  }
+
+  public reset(): void {
+    this.start();
+    this.throttle = 0;
+    this.engineBrakingTorque = 0;
   }
 
   /**
@@ -117,78 +159,110 @@ export class Engine {
     const alpha = clamp(dt / (this.config.throttleResponseTau + dt), 0.05, 1.0);
     this.throttle = lerp(this.throttle, clampedInput, alpha);
 
-    // 2. Rev limiter state logic
+    // 2. Stalled or Engine Off State:
+    // When stalled, combustion ceases entirely and the rotating assembly spins down to zero.
+    if (!this.isRunning) {
+      this.rawCombustionTorque = 0;
+      this.outputTorque = 0;
+      this.isRevLimiterActive = false;
+      this.engineBrakingTorque = this.config.engineBrakingBase + this.config.engineBrakingRpmFactor * this.rpm;
+
+      if (clutchEngagement >= 0.95) {
+        // Locked to driveshaft: RPM follows vehicle motion directly
+        this.rpm = clamp(targetDrivetrainRpm, 0, this.config.redlineRpm);
+        this.omega = (this.rpm * 2 * Math.PI) / 60;
+      } else {
+        // Freely spinning down under engine internal friction
+        const spinDownOmega = (this.engineBrakingTorque / this.config.inertia) * dt;
+        this.omega = Math.max(0, this.omega - spinDownOmega);
+        this.rpm = (this.omega * 60) / (2 * Math.PI);
+      }
+      return;
+    }
+
+    // 3. Diesel Governor / Rev Limiter Logic
     if (this.rpm >= this.config.revLimiterCutRpm) {
       this.isRevLimiterActive = true;
     } else if (this.rpm <= this.config.revLimiterResumeRpm) {
       this.isRevLimiterActive = false;
     }
 
-    // 3. Wide-open-throttle torque & net combustion torque
+    // 4. Wide-open-throttle torque & net combustion torque
     const wotTorque = this.getWOTTorque(this.rpm);
     let combustionTorque = wotTorque * this.throttle;
 
-    // Fuel cut during rev limiter activation
+    // Fuel cut during governor activation
     if (this.isRevLimiterActive) {
       combustionTorque = 0;
     }
 
-    // 4. Closed-loop Idle Governor
-    // When idling at zero throttle, inject minimal torque to sustain idle speed
-    if (this.throttle < 0.01 && this.rpm <= this.config.idleRpm + 50) {
+    // 5. Closed-loop Diesel Idle Governor
+    // When idling at low throttle, inject governor torque to sustain idle speed (750 RPM).
+    // The governor has realistic limited authority (max ~75 N*m), so high driveline load can lug it down.
+    if (this.throttle < 0.15 && this.rpm <= this.config.idleRpm + 40) {
       const idleDeficit = Math.max(0, this.config.idleRpm - this.rpm);
-      const idleGovernorTorque = clamp(idleDeficit * 0.85, 0, 60.0);
+      const idleGovernorTorque = clamp(idleDeficit * 1.1, 0, 75.0);
       combustionTorque = Math.max(combustionTorque, idleGovernorTorque);
     }
 
     this.rawCombustionTorque = combustionTorque;
 
-    // 5. Engine friction & engine braking torque (always opposes rotation)
+    // 6. Engine friction & engine braking torque (always opposes rotation)
     this.engineBrakingTorque = this.config.engineBrakingBase + this.config.engineBrakingRpmFactor * this.rpm;
 
-    // 6. Net flywheel torque before clutch
-    // When throttle is released, net torque is negative (engine braking)
+    // 7. Net flywheel torque before clutch
     const netFlywheelTorque = combustionTorque - this.engineBrakingTorque;
 
-    // 7. Dynamic Engine RPM Integration
+    // 8. Dynamic Engine RPM Integration & Realistic Stalling
     if (clutchEngagement >= 0.95) {
       // Locked clutch regime: Engine RPM is rigidly coupled to driveshaft rotation
-      const coupledRpm = Math.max(this.config.idleRpm, targetDrivetrainRpm);
-      this.rpm = clamp(coupledRpm, this.config.idleRpm, this.config.redlineRpm + 100);
+      const coupledRpm = targetDrivetrainRpm;
+      this.rpm = coupledRpm;
       this.omega = (this.rpm * 2 * Math.PI) / 60;
-
-      // In locked regime, engine delivers net torque directly to the clutch
       this.outputTorque = netFlywheelTorque;
+
+      // Stall check under locked clutch: if driveline drags engine below stall threshold
+      if (this.rpm < this.config.stallRpm) {
+        this.stall();
+        return;
+      }
     } else {
       // Slipping clutch or neutral/idle regime:
-      // Torque transmitted across clutch scales with slip speed and clutch engagement
       const slipRpm = this.rpm - targetDrivetrainRpm;
-      const normalizedSlip = clamp(slipRpm / 400, -1.0, 1.0);
+      const normalizedSlip = clamp(slipRpm / 350, -1.0, 1.0);
       const clutchSlipTorque = normalizedSlip * 480.0 * clutchEngagement;
 
       const netTorqueOnFlywheel = netFlywheelTorque - clutchSlipTorque;
       const dOmega = (netTorqueOnFlywheel / this.config.inertia) * dt;
       this.omega += dOmega;
 
-      // Prevent engine from stalling below idle speed (automatic idle governor catch)
-      const minOmega = (this.config.idleRpm * 2 * Math.PI) / 60;
-      if (this.omega < minOmega) {
-        this.omega = minOmega;
-      }
-
-      // Cap at rev limiter
-      const maxOmega = (this.config.redlineRpm * 2 * Math.PI) / 60;
-      if (this.omega > maxOmega) {
-        this.omega = maxOmega;
-      }
-
       this.rpm = (this.omega * 60) / (2 * Math.PI);
 
-      // Output torque transmitted into transmission is the clutch slip torque
+      // Stall check under clutch load:
+      // If clutch is loaded (engagement > 0.15) and driveshaft is lugging the engine below stall threshold
+      if (clutchEngagement > 0.15 && this.rpm < this.config.stallRpm) {
+        this.stall();
+        return;
+      }
+
+      // Idle governor catch when clutch is disengaged or vehicle in neutral
+      const minOmega = (this.config.idleRpm * 2 * Math.PI) / 60;
+      if (this.omega < minOmega && clutchEngagement <= 0.15) {
+        this.omega = minOmega;
+        this.rpm = this.config.idleRpm;
+      }
+
+      // Cap at governor max limit
+      const maxOmega = ((this.config.redlineRpm + 100) * 2 * Math.PI) / 60;
+      if (this.omega > maxOmega) {
+        this.omega = maxOmega;
+        this.rpm = (this.omega * 60) / (2 * Math.PI);
+      }
+
       this.outputTorque = clutchSlipTorque;
     }
 
-    // Safety: at zero throttle and vehicle standstill, output torque must not creep
+    // Safety: at zero throttle and vehicle standstill with clutch disengaged, output torque must not creep
     if (this.throttle < 0.005 && clutchEngagement < 0.1) {
       this.outputTorque = 0;
     }
