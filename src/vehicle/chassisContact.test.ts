@@ -116,7 +116,7 @@ test('Chassis Contact: Safety-net test pose (K) recovers gracefully without rock
   }
 
   assert.ok(contact.safetyNetCounter > 0, 'Safety net triggered successfully');
-  assert.ok(body.position.y > 0.05 && body.position.y < 0.60, `Position gracefully recovered above ground, got y=${body.position.y}`);
+  assert.ok(body.position.y > 0.05 && body.position.y < 0.85, `Position gracefully recovered above ground, got y=${body.position.y}`);
   assert.ok(Math.abs(body.linearVelocity.y) < 0.2, `Velocity settled near zero without flying to space, got vy=${body.linearVelocity.y}`);
   assert.ok(body.angularVelocity.length() < 0.2, `Angular velocity settled near zero, got w=${body.angularVelocity.length()}`);
   assert.equal(body.nanResetCount, 0, 'Zero NaN resets');

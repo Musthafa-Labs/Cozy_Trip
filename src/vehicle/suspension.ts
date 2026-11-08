@@ -4,7 +4,7 @@
  */
 
 import * as THREE from 'three';
-import { SCRATCH_VEC3_A, SCRATCH_VEC3_B, SCRATCH_VEC3_C, clamp } from '../utils/math';
+import { clamp } from '../utils/math';
 import { RigidBody } from './rigidBody';
 import { TestGround, GroundQuery } from '../world/testGround';
 
@@ -20,6 +20,54 @@ export interface WheelMountConfig {
   reboundDamping: number;        // N*s/m (extension damping)
 }
 
+export interface WheelRayConfig {
+  id: string;
+  angleRad: number;           // Angle from strut down axis (rad, positive = forward, negative = rearward)
+  longitudinalOffset: number; // Offset along wheel longitudinal axis (m)
+  circOffset: number;         // Circular perimeter offset along strut axis: R * cos(angle) (m)
+}
+
+/**
+ * 5-Ray Array per wheel spanning the lower contact arc:
+ * - center (0°): directly below wheel axle, dominant on level ground and uniform slopes
+ * - front_bottom (+22.5°): low-angle bumps and rising terrain
+ * - leading_face (+45°): curbs, rocks, and step obstacles (~0.10 - 0.18m high)
+ * - high_leading (+68°): sharp vertical lips and obstacles up to 0.25m high
+ * - rear_bottom (-25°): trailing perimeter to prevent drop-off snagging on curbs and trenches
+ */
+export const WHEEL_RAYS: WheelRayConfig[] = [
+  {
+    id: 'center',
+    angleRad: 0.0,
+    longitudinalOffset: 0.0,
+    circOffset: 0.38,
+  },
+  {
+    id: 'front_bottom',
+    angleRad: 0.39270, // 22.5°
+    longitudinalOffset: 0.38 * Math.sin(0.39270), // ~0.145 m
+    circOffset: 0.38 * Math.cos(0.39270),         // ~0.351 m
+  },
+  {
+    id: 'leading_face',
+    angleRad: 0.78540, // 45.0°
+    longitudinalOffset: 0.38 * Math.sin(0.78540), // ~0.269 m
+    circOffset: 0.38 * Math.cos(0.78540),         // ~0.269 m
+  },
+  {
+    id: 'high_leading',
+    angleRad: 1.18682, // 68.0°
+    longitudinalOffset: 0.38 * Math.sin(1.18682), // ~0.352 m
+    circOffset: 0.38 * Math.cos(1.18682),         // ~0.142 m
+  },
+  {
+    id: 'rear_bottom',
+    angleRad: -0.43633, // -25.0°
+    longitudinalOffset: 0.38 * Math.sin(-0.43633), // ~ -0.161 m
+    circOffset: 0.38 * Math.cos(-0.43633),         // ~0.344 m
+  },
+];
+
 export class WheelState {
   public readonly id: 'FL' | 'FR' | 'RL' | 'RR';
   public readonly config: WheelMountConfig;
@@ -29,12 +77,15 @@ export class WheelState {
   public compressionVelocity: number = 0;      // Rate of spring compression change (m/s)
   public normalLoad: number = 0;               // Normal force Fz (N)
   public grounded: boolean = false;            // Ground contact flag
-  public wasGrounded: boolean = false;         // PART C.1: Track previous ground state to prevent first-contact spike
+  public wasGrounded: boolean = false;         // Track previous ground state to prevent first-contact spike
   public readonly contactPoint = new THREE.Vector3();
   public readonly contactNormal = new THREE.Vector3(0, 1, 0);
+  public readonly rawContactNormal = new THREE.Vector3(0, 1, 0); // Unsmoothed target normal
   public readonly wheelWorldPosition = new THREE.Vector3();
+  public steerAngle: number = 0;               // Steer angle of this wheel (rad)
+  public dominantRayId: string = 'center';     // Debug telemetry for active contact ray
 
-  // FIX H: Over-travel hard stop telemetry and state
+  // Over-travel hard stop telemetry and state
   public overTravel: number = 0;               // Travel beyond maxTravel (m)
   public previousOverTravel: number = 0;       // Previous frame overTravel (m)
   public overTravelVelocity: number = 0;       // Rate of change of overTravel (m/s)
@@ -56,6 +107,7 @@ export interface SuspensionSystemConfig {
   hardStopStiffness?: number; // Hard stop stiffness beyond maxTravel (N/m)
   hardStopDamping?: number;   // Hard stop damping beyond maxTravel (N*s/m)
   hardStopMaxForce?: number;  // Hard stop maximum clamping force (N)
+  normalSmoothingAlpha?: number; // Normal exponential smoothing factor at 120 Hz (0.35)
 }
 
 export class SuspensionSystem {
@@ -71,10 +123,28 @@ export class SuspensionSystem {
   public bumpStopThreshold: number;
   public bumpStopStiffness: number;
 
-  // FIX H: Hard stop configuration for suspension bottom-out
+  // Hard stop configuration for suspension bottom-out
   public hardStopStiffness: number; // Hard stop stiffness beyond maxTravel (N/m)
   public hardStopDamping: number;   // Hard stop damping beyond maxTravel (N*s/m)
   public hardStopMaxForce: number;  // Hard stop maximum clamping force (N)
+
+  // Contact normal smoothing coefficient at 120 Hz
+  public normalSmoothingAlpha: number;
+
+  // Pre-allocated dedicated scratch vectors to guarantee ZERO per-frame allocations
+  private readonly _worldMount = new THREE.Vector3();
+  private readonly _bodyDown = new THREE.Vector3();
+  private readonly _bodyUp = new THREE.Vector3();
+  private readonly _bodyFwd = new THREE.Vector3();
+  private readonly _wheelFwd = new THREE.Vector3();
+  private readonly _probePos = new THREE.Vector3();
+  private readonly _groundPoint = new THREE.Vector3();
+  private readonly _diff = new THREE.Vector3();
+  private readonly _circleNormal = new THREE.Vector3();
+  private readonly _targetNormal = new THREE.Vector3();
+  private readonly _dominantContactPoint = new THREE.Vector3();
+  private readonly _dominantGroundNormal = new THREE.Vector3();
+  private readonly _forceVec = new THREE.Vector3();
 
   constructor(config: Partial<SuspensionSystemConfig> = {}) {
     this.frontArbStiffness = config.frontArbStiffness ?? 9500;
@@ -82,10 +152,10 @@ export class SuspensionSystem {
     this.bumpStopThreshold = config.bumpStopThreshold ?? 0.80;
     this.bumpStopStiffness = config.bumpStopStiffness ?? 150000;
 
-    // FIX H: Hard stop parameter defaults with units
     this.hardStopStiffness = config.hardStopStiffness ?? 200000; // N/m
     this.hardStopDamping = config.hardStopDamping ?? 40000;       // N*s/m
     this.hardStopMaxForce = config.hardStopMaxForce ?? 45000;    // N
+    this.normalSmoothingAlpha = config.normalSmoothingAlpha ?? 0.35;
 
     const restLength = 0.65;
     const maxTravel = 0.35;
@@ -96,8 +166,7 @@ export class SuspensionSystem {
     const bumpC = 3600;
     const reboundC = 5200;
 
-    // PART A.4: Swap the x sign of the four wheel mounts so labels are physically correct:
-    // Left side is +X (FL = +0.80, RL = +0.80), Right side is -X (FR = -0.80, RR = -0.80)
+    // Wheel mounts in body space (+X left, -X right, +Z forward, -Z rear):
     const flConfig: WheelMountConfig = {
       id: 'FL',
       localMountPoint: new THREE.Vector3(0.80, -0.15, 1.30),
@@ -155,34 +224,72 @@ export class SuspensionSystem {
   }
 
   /**
-   * Evaluates raycasts, spring forces, damping, anti-roll bars, and normal suspension load.
+   * Evaluates multi-ray ground contact, spring forces, damping, anti-roll bars,
+   * leading-edge obstacle detection, and normal suspension load.
    */
-  public update(rigidBody: RigidBody, world: TestGround, dt: number): void {
-    // 1. Raycast each wheel down to find compression and contact points
+  public update(rigidBody: RigidBody, world: TestGround, dt: number, steerAngles?: number[]): void {
+    // 1. Multi-Ray Array contact detection per wheel
     for (let i = 0; i < 4; i++) {
       const wheel = this.wheels[i];
       const cfg = wheel.config;
 
+      if (steerAngles && steerAngles[i] !== undefined) {
+        wheel.steerAngle = steerAngles[i];
+      }
+
       // Mount point in world space
-      const worldMount = SCRATCH_VEC3_A;
-      rigidBody.localToWorld(cfg.localMountPoint, worldMount);
+      rigidBody.localToWorld(cfg.localMountPoint, this._worldMount);
 
-      // Suspension raycast downwards: ray along vehicle's local down axis
-      const bodyDown = SCRATCH_VEC3_B.set(0, -1, 0).applyQuaternion(rigidBody.quaternion).normalize();
+      // Orientation axes in world space
+      this._bodyDown.set(0, -1, 0).applyQuaternion(rigidBody.quaternion).normalize();
+      this._bodyUp.copy(this._bodyDown).negate();
+      this._bodyFwd.set(0, 0, 1).applyQuaternion(rigidBody.quaternion).normalize();
 
-      // Query ground directly below mount position
-      const groundInfo: GroundQuery = world.getHeightNormalSurface(worldMount.x, worldMount.z);
+      // Steered wheel forward axis
+      if (Math.abs(wheel.steerAngle) > 0.0001) {
+        this._wheelFwd.copy(this._bodyFwd).applyAxisAngle(this._bodyUp, wheel.steerAngle).normalize();
+      } else {
+        this._wheelFwd.copy(this._bodyFwd);
+      }
 
-      const groundY = groundInfo.height;
-      const verticalDist = worldMount.y - groundY;
-      const maxReach = cfg.restLength + cfg.wheelRadius;
+      // Query multi-ray array to find highest contact elevation / maximum required compression
+      let maxComp = -Infinity;
+      let dominantIdx = -1;
+      let isGrounded = false;
 
-      if (verticalDist < maxReach && verticalDist > -0.5) {
+      for (let k = 0; k < WHEEL_RAYS.length; k++) {
+        const ray = WHEEL_RAYS[k];
+
+        // Probe ground position along steered wheel plane
+        this._probePos.copy(this._worldMount).addScaledVector(this._wheelFwd, ray.longitudinalOffset);
+        const gInfo: GroundQuery = world.getHeightNormalSurface(this._probePos.x, this._probePos.z);
+        this._groundPoint.set(this._probePos.x, gInfo.height, this._probePos.z);
+
+        // Distance from strut mount to ground along the suspension downward travel axis
+        const distDown = this._diff.subVectors(this._groundPoint, this._worldMount).dot(this._bodyDown);
+        const reach = cfg.restLength + ray.circOffset;
+
+        if (distDown < reach && distDown > -0.5) {
+          isGrounded = true;
+          const comp = reach - distDown;
+
+          if (comp > maxComp) {
+            maxComp = comp;
+            dominantIdx = k;
+            this._dominantContactPoint.copy(this._groundPoint);
+            this._dominantGroundNormal.copy(gInfo.normal);
+          }
+        }
+      }
+
+      if (isGrounded && dominantIdx >= 0) {
         wheel.grounded = true;
-        const unconstrainedCompression = maxReach - verticalDist;
+        wheel.dominantRayId = WHEEL_RAYS[dominantIdx].id;
+
+        const unconstrainedCompression = maxComp;
         wheel.compression = clamp(unconstrainedCompression, 0, cfg.maxTravel);
 
-        // FIX H: Bottom-out over-travel calculation
+        // Bottom-out over-travel calculation
         const over = Math.max(0, unconstrainedCompression - cfg.maxTravel);
         if (!wheel.wasGrounded) {
           wheel.previousOverTravel = over;
@@ -191,22 +298,42 @@ export class SuspensionSystem {
         wheel.previousOverTravel = over;
         wheel.overTravel = over;
 
-        // PART C.1: First contact spike suppression
+        // First contact spike suppression
         if (!wheel.wasGrounded) {
           wheel.previousCompression = wheel.compression;
         }
 
-        // PART C.1: Clamp compressionVelocity to -5 .. +5 m/s
+        // Clamp compressionVelocity to -5 .. +5 m/s to prevent numerical force shock
         const rawCompVel = (wheel.compression - wheel.previousCompression) / Math.max(0.0001, dt);
         wheel.compressionVelocity = clamp(rawCompVel, -5.0, 5.0);
         wheel.previousCompression = wheel.compression;
 
-        // Contact point on ground
-        wheel.contactPoint.set(worldMount.x, groundY, worldMount.z);
-        wheel.contactNormal.copy(groundInfo.normal);
+        // Compute contact normal from dominant ray geometry
+        const domRay = WHEEL_RAYS[dominantIdx];
 
-        // PART B: Compute wheelWorldPosition from mount and clamped compression (never pops above body)
-        wheel.wheelWorldPosition.copy(worldMount).addScaledVector(bodyDown, cfg.restLength - wheel.compression);
+        // Circle normal pointing from the contact perimeter point inward toward the wheel hub
+        this._circleNormal.copy(this._bodyUp).multiplyScalar(Math.cos(domRay.angleRad))
+          .addScaledVector(this._wheelFwd, -Math.sin(domRay.angleRad)).normalize();
+
+        // Blend circle contact normal with terrain surface normal based on ray angle:
+        // On level ground and smooth slopes, domRay is center (angle = 0) -> 100% terrain normal
+        // On sharp steps and obstacles, forward circle normal blends in to provide climbing reaction
+        const blendWeight = Math.abs(Math.sin(domRay.angleRad));
+        this._targetNormal.copy(this._dominantGroundNormal).lerp(this._circleNormal, blendWeight).normalize();
+        wheel.rawContactNormal.copy(this._targetNormal);
+
+        // Apply exponential smoothing at 120 Hz to prevent abrupt impulse spikes on sharp edges
+        if (!wheel.wasGrounded) {
+          wheel.contactNormal.copy(this._targetNormal);
+        } else {
+          wheel.contactNormal.lerp(this._targetNormal, this.normalSmoothingAlpha).normalize();
+        }
+
+        // Effective contact point on obstacle / terrain surface
+        wheel.contactPoint.copy(this._dominantContactPoint);
+
+        // Wheel hub position along suspension travel line
+        wheel.wheelWorldPosition.copy(this._worldMount).addScaledVector(this._bodyDown, cfg.restLength - wheel.compression);
 
         wheel.wasGrounded = true;
       } else {
@@ -220,7 +347,8 @@ export class SuspensionSystem {
         wheel.overTravel = 0;
         wheel.previousOverTravel = 0;
         wheel.overTravelVelocity = 0;
-        wheel.wheelWorldPosition.copy(worldMount).addScaledVector(bodyDown, cfg.restLength);
+        wheel.dominantRayId = 'airborne';
+        wheel.wheelWorldPosition.copy(this._worldMount).addScaledVector(this._bodyDown, cfg.restLength);
       }
     }
 
@@ -257,7 +385,7 @@ export class SuspensionSystem {
         bumpStopForce = this.bumpStopStiffness * (excess ** 2);
       }
 
-      // FIX H: Bottom-out hard stop force
+      // Bottom-out hard stop force
       let hardStopForce = 0;
       if (wheel.overTravel > 0) {
         hardStopForce = this.hardStopStiffness * wheel.overTravel + this.hardStopDamping * wheel.overTravelVelocity;
@@ -277,8 +405,8 @@ export class SuspensionSystem {
       wheel.normalLoad = Math.max(0, rawLoad);
 
       // Suspension force vector: push along contact surface normal
-      const forceVec = SCRATCH_VEC3_C.copy(wheel.contactNormal).multiplyScalar(wheel.normalLoad);
-      rigidBody.applyForceAtWorldPoint(forceVec, wheel.contactPoint);
+      this._forceVec.copy(wheel.contactNormal).multiplyScalar(wheel.normalLoad);
+      rigidBody.applyForceAtWorldPoint(this._forceVec, wheel.contactPoint);
     }
   }
 }

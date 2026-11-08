@@ -81,6 +81,7 @@ export class WheelDynamics {
     dt: number
   ): void {
     this.surface = surfaceType;
+    suspensionWheel.steerAngle = this.steerAngle;
 
     // =========================================================================
     // AIRBORNE WHEEL DYNAMICS
@@ -133,7 +134,12 @@ export class WheelDynamics {
 
     // Project forward onto ground plane
     const dotForwardNormal = this._bodyForward.dot(normal);
-    this._groundForward.copy(this._bodyForward).addScaledVector(normal, -dotForwardNormal).normalize();
+    this._groundForward.copy(this._bodyForward).addScaledVector(normal, -dotForwardNormal);
+    if (this._groundForward.lengthSq() > 0.0001) {
+      this._groundForward.normalize();
+    } else {
+      this._groundForward.copy(this._bodyForward);
+    }
 
     // Rotate about ground normal by steerAngle
     if (Math.abs(this.steerAngle) > 0.0001) {

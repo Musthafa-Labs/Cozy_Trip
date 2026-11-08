@@ -65,6 +65,13 @@ export class VehicleVisualModel {
       roughness: 0.3,
     });
 
+    const skidMat = new THREE.MeshStandardMaterial({
+      color: 0x3a3e3c, // Heavy-duty steel skid plate
+      roughness: 0.75,
+      metalness: 0.35,
+      flatShading: true,
+    });
+
     // 1. Lower chassis / body tub
     const lowerBodyGeom = new THREE.BoxGeometry(1.8, 0.65, 3.8);
     const lowerBody = new THREE.Mesh(lowerBodyGeom, bodyMat);
@@ -72,6 +79,86 @@ export class VehicleVisualModel {
     lowerBody.castShadow = true;
     lowerBody.receiveShadow = true;
     this.bodyMesh.add(lowerBody);
+
+    // 1b. Lower body rocker sills (between wheel arches, Z = -0.85 to +0.85m, Y = -0.48m)
+    const rockerGeom = new THREE.BoxGeometry(1.76, 0.32, 1.70);
+    const rockerMesh = new THREE.Mesh(rockerGeom, bodyMat);
+    rockerMesh.position.set(0, -0.32, 0);
+    rockerMesh.castShadow = true;
+    this.bodyMesh.add(rockerMesh);
+
+    // 1c. Wheel Arch Fender Flares (framing tires at X = ±0.90, Z = ±1.30m)
+    const flareGeom = new THREE.BoxGeometry(0.08, 0.22, 0.90);
+    for (const zAxle of [1.30, -1.30]) {
+      for (const signX of [-1, 1]) {
+        const flare = new THREE.Mesh(flareGeom, darkTrimMat);
+        flare.position.set(signX * 0.90, -0.28, zAxle);
+        flare.castShadow = true;
+        this.bodyMesh.add(flare);
+      }
+    }
+
+    // 1d. Underbody Chassis Frame Rails & Center Belly Pan
+    // Center transfer case / transmission skid plate (Y = -0.70m, 0.32m clearance on level ground)
+    const bellyPanGeom = new THREE.BoxGeometry(0.90, 0.08, 1.40);
+    const bellyPan = new THREE.Mesh(bellyPanGeom, skidMat);
+    bellyPan.position.set(0, -0.70, 0);
+    bellyPan.castShadow = true;
+    bellyPan.receiveShadow = true;
+    this.bodyMesh.add(bellyPan);
+
+    // Chassis frame rails (longitudinal ladder frame)
+    const frameRailGeom = new THREE.BoxGeometry(1.20, 0.16, 3.30);
+    const frameRails = new THREE.Mesh(frameRailGeom, darkTrimMat);
+    frameRails.position.set(0, -0.52, 0);
+    frameRails.castShadow = true;
+    this.bodyMesh.add(frameRails);
+
+    // 1e. Front and Rear Solid Axle Tubes & Differential Pumpkins
+    const axleTubeGeom = new THREE.CylinderGeometry(0.045, 0.045, 1.45, 8);
+    axleTubeGeom.rotateZ(Math.PI / 2);
+
+    const diffPumpkinGeom = new THREE.SphereGeometry(0.12, 10, 8);
+
+    // Front Axle (Z = +1.30m, hub center Y = -0.68m, diff bottom Y = -0.78m)
+    const frontAxle = new THREE.Mesh(axleTubeGeom, darkTrimMat);
+    frontAxle.position.set(0, -0.68, 1.30);
+    frontAxle.castShadow = true;
+    this.bodyMesh.add(frontAxle);
+
+    const frontDiff = new THREE.Mesh(diffPumpkinGeom, skidMat);
+    frontDiff.position.set(0, -0.70, 1.30);
+    frontDiff.scale.set(1.0, 0.85, 1.1);
+    frontDiff.castShadow = true;
+    this.bodyMesh.add(frontDiff);
+
+    // Rear Axle (Z = -1.30m, hub center Y = -0.68m, diff bottom Y = -0.78m)
+    const rearAxle = new THREE.Mesh(axleTubeGeom, darkTrimMat);
+    rearAxle.position.set(0, -0.68, -1.30);
+    rearAxle.castShadow = true;
+    this.bodyMesh.add(rearAxle);
+
+    const rearDiff = new THREE.Mesh(diffPumpkinGeom, skidMat);
+    rearDiff.position.set(0, -0.70, -1.30);
+    rearDiff.scale.set(1.0, 0.85, 1.1);
+    rearDiff.castShadow = true;
+    this.bodyMesh.add(rearDiff);
+
+    // 1f. Front Approach Skid Plate (swept up from front axle to front bumper, ~16° ramp)
+    const frontSkidGeom = new THREE.BoxGeometry(0.75, 0.06, 0.72);
+    frontSkidGeom.rotateX(0.25); // ~14.3° tilt matching approach ramp
+    const frontSkid = new THREE.Mesh(frontSkidGeom, skidMat);
+    frontSkid.position.set(0, -0.64, 1.70);
+    frontSkid.castShadow = true;
+    this.bodyMesh.add(frontSkid);
+
+    // 1g. Rear Departure Skid Plate (swept up from rear axle to rear bumper, ~17° ramp)
+    const rearSkidGeom = new THREE.BoxGeometry(0.75, 0.06, 0.70);
+    rearSkidGeom.rotateX(-0.25);
+    const rearSkid = new THREE.Mesh(rearSkidGeom, skidMat);
+    rearSkid.position.set(0, -0.63, -1.68);
+    rearSkid.castShadow = true;
+    this.bodyMesh.add(rearSkid);
 
     // 2. Cabin / Greenhouse
     const cabinGeom = new THREE.BoxGeometry(1.6, 0.85, 2.2);
@@ -93,17 +180,31 @@ export class VehicleVisualModel {
     this.bodyMesh.add(rearGlass);
 
     // 4. Bumpers
-    const frontBumperGeom = new THREE.BoxGeometry(1.9, 0.25, 0.35);
+    // Front Bumper: upper beam and lower chin apron down to Y = -0.56m (approach angle >= 28°)
+    const frontBumperGeom = new THREE.BoxGeometry(1.90, 0.25, 0.35);
     const frontBumper = new THREE.Mesh(frontBumperGeom, darkTrimMat);
     frontBumper.position.set(0, 0.05, 2.05);
     frontBumper.castShadow = true;
     this.bodyMesh.add(frontBumper);
 
-    const rearBumperGeom = new THREE.BoxGeometry(1.9, 0.25, 0.3);
+    const frontApronGeom = new THREE.BoxGeometry(1.70, 0.38, 0.28);
+    const frontApron = new THREE.Mesh(frontApronGeom, darkTrimMat);
+    frontApron.position.set(0, -0.26, 2.02);
+    frontApron.castShadow = true;
+    this.bodyMesh.add(frontApron);
+
+    // Rear Bumper: upper beam and lower departure apron down to Y = -0.54m (departure angle >= 33°)
+    const rearBumperGeom = new THREE.BoxGeometry(1.90, 0.25, 0.30);
     const rearBumper = new THREE.Mesh(rearBumperGeom, darkTrimMat);
     rearBumper.position.set(0, 0.05, -1.95);
     rearBumper.castShadow = true;
     this.bodyMesh.add(rearBumper);
+
+    const rearApronGeom = new THREE.BoxGeometry(1.70, 0.38, 0.25);
+    const rearApron = new THREE.Mesh(rearApronGeom, darkTrimMat);
+    rearApron.position.set(0, -0.26, -1.92);
+    rearApron.castShadow = true;
+    this.bodyMesh.add(rearApron);
 
     // 5. Classic Round Headlights
     const headlightGeom = new THREE.CylinderGeometry(0.18, 0.18, 0.1, 16);
