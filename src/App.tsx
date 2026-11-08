@@ -69,6 +69,7 @@ export default function App() {
   const stationIndexRef = useRef<number>(0);
   const inputRef = useRef<InputManager | null>(null);
   const pendingSidewaysPushRef = useRef<boolean>(false);
+  const handbrakeLatchedRef = useRef<boolean>(false);
 
   // Preallocated structures for render interpolation
   const prevBodyPos = useRef(new THREE.Vector3());
@@ -116,6 +117,7 @@ export default function App() {
     if (chassis) chassis.reset();
     pendingSidewaysPushRef.current = false;
     lastGearRef.current = 1;
+    handbrakeLatchedRef.current = false;
 
     // Sync previous and current interpolation history to prevent jump on reset
     prevBodyPos.current.copy(body.position);
@@ -446,7 +448,7 @@ export default function App() {
         // =====================================================================
         const throttleKey = input.isDown('w') || input.isDown('arrowup');
         const brakeKey = input.isDown('s') || input.isDown('arrowdown');
-        const handbrakePressed = input.isDown(' ');
+        const handbrakePressed = handbrakeLatchedRef.current;
 
         let targetThrottle = 0;
         let brakePedal = 0;
@@ -610,6 +612,9 @@ export default function App() {
         }
         if (input.wasJustPressed('l')) {
           toggleRangeCase();
+        }
+        if (input.wasJustPressed(' ')) {
+          handbrakeLatchedRef.current = !handbrakeLatchedRef.current;
         }
 
         // =====================================================================

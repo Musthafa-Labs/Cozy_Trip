@@ -418,7 +418,7 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
                   telemetry.handbrakeActive ? 'bg-amber-600 text-white animate-pulse' : 'bg-stone-200 text-stone-500'
                 }`}
               >
-                Space: Handbrake
+                Space: Handbrake on/off
               </span>
             </div>
 
@@ -714,7 +714,7 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({
             [A/D] Steer
           </span>
           <span className="rounded bg-stone-200/80 px-2 py-0.5 font-mono text-[11px] text-stone-800">
-            [Space] Handbrake
+            [Space] Handbrake on/off
           </span>
           <span className="rounded bg-stone-200/80 px-2 py-0.5 font-mono text-[11px] text-stone-800">
             [Q/E] Shift Down/Up
