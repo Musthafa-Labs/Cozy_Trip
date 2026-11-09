@@ -20,7 +20,7 @@ export interface BrakeConfig {
 export const DEFAULT_BRAKE_CONFIG: BrakeConfig = {
   maxBrakeTorque: 6000,
   frontBias: 0.65,
-  handbrakeTorque: 2600,
+  handbrakeTorque: 3200,
   pedalResponseTau: 0.05,
   absEnabled: false,
   absMinSpeedMs: 2.2,

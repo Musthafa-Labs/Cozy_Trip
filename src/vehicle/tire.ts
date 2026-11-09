@@ -5,36 +5,53 @@
 
 import { clamp } from '../utils/math';
 
-export type SurfaceType = 'asphalt' | 'dirt' | 'mud' | 'gravel';
+export type SurfaceType =
+  | 'asphalt'
+  | 'dirt'
+  | 'gravel'
+  | 'mud'
+  | 'rock'
+  | 'ice'
+  | 'grass'
+  | 'sand'
+  | 'snow';
 
 export interface PacejkaCoefficients {
-  muX: number;       // Peak longitudinal friction coefficient
-  muY: number;       // Peak lateral friction coefficient
-  Bx: number;        // Stiffness factor (longitudinal)
-  Cx: number;        // Shape factor (longitudinal)
-  Ex: number;        // Curvature factor (longitudinal)
-  By: number;        // Stiffness factor (lateral)
-  Cy: number;        // Shape factor (lateral)
-  Ey: number;        // Curvature factor (lateral)
+  muStatic: number;        // Peak static friction coefficient (mu_static)
+  muKinetic: number;       // Sliding dynamic friction coefficient (mu_kinetic)
+  muX: number;             // Peak longitudinal friction coefficient (= muStatic)
+  muY: number;             // Peak lateral friction coefficient (~0.95 * muStatic)
+  Bx: number;              // Stiffness factor (longitudinal)
+  Cx: number;              // Shape factor (longitudinal)
+  Ex: number;              // Curvature factor (longitudinal)
+  By: number;              // Stiffness factor (lateral)
+  Cy: number;              // Shape factor (lateral)
+  Ey: number;              // Curvature factor (lateral)
   rollingResCoeff: number; // Rolling resistance coefficient Crr
 }
 
-// Empirical Pacejka coefficient sets tuned for off-road vintage 4x4 tires
+// Dynamic surface physics parameter matrix calibrated for off-road vintage 4x4 tires
 export const SURFACE_PACEJKA: Record<SurfaceType, PacejkaCoefficients> = {
+  // 1. Asphalt: High grip, low rolling drag
   asphalt: {
-    muX: 1.05,
-    muY: 1.00,
-    Bx: 10.5,
+    muStatic: 0.95,
+    muKinetic: 0.85,
+    muX: 0.95,
+    muY: 0.90,
+    Bx: 10.0,
     Cx: 1.65,
     Ex: 0.95,
-    By: 9.5,
+    By: 9.0,
     Cy: 1.35,
     Ey: -1.0,
     rollingResCoeff: 0.015,
   },
+  // 2. Dry Dirt: Moderate grip, standard trail drag
   dirt: {
-    muX: 0.82,
-    muY: 0.78,
+    muStatic: 0.75,
+    muKinetic: 0.65,
+    muX: 0.75,
+    muY: 0.70,
     Bx: 8.5,
     Cx: 1.45,
     Ex: 0.90,
@@ -43,20 +60,12 @@ export const SURFACE_PACEJKA: Record<SurfaceType, PacejkaCoefficients> = {
     Ey: -1.1,
     rollingResCoeff: 0.035,
   },
-  mud: {
-    muX: 0.38,
-    muY: 0.34,
-    Bx: 5.2,
-    Cx: 1.20,
-    Ex: 0.75,
-    By: 4.8,
-    Cy: 1.10,
-    Ey: -1.4,
-    rollingResCoeff: 0.090,
-  },
+  // 3. Loose Gravel: Low grip, loose rolling drag
   gravel: {
-    muX: 0.58,
-    muY: 0.52,
+    muStatic: 0.55,
+    muKinetic: 0.45,
+    muX: 0.55,
+    muY: 0.50,
     Bx: 6.8,
     Cx: 1.30,
     Ex: 0.85,
@@ -64,6 +73,90 @@ export const SURFACE_PACEJKA: Record<SurfaceType, PacejkaCoefficients> = {
     Cy: 1.15,
     Ey: -1.2,
     rollingResCoeff: 0.060,
+  },
+  // 4. Wet Mud: High rolling drag, heavy slip
+  mud: {
+    muStatic: 0.38,
+    muKinetic: 0.28,
+    muX: 0.38,
+    muY: 0.32,
+    Bx: 5.2,
+    Cx: 1.20,
+    Ex: 0.75,
+    By: 4.8,
+    Cy: 1.10,
+    Ey: -1.4,
+    rollingResCoeff: 0.120,
+  },
+  // 5. Rock Face: High grip, solid face
+  rock: {
+    muStatic: 0.88,
+    muKinetic: 0.78,
+    muX: 0.88,
+    muY: 0.82,
+    Bx: 9.5,
+    Cx: 1.55,
+    Ex: 0.92,
+    By: 8.5,
+    Cy: 1.30,
+    Ey: -1.05,
+    rollingResCoeff: 0.025,
+  },
+  // 6. Snow / Ice: Very low friction, high wheelspin
+  ice: {
+    muStatic: 0.22,
+    muKinetic: 0.15,
+    muX: 0.22,
+    muY: 0.18,
+    Bx: 4.5,
+    Cx: 1.15,
+    Ex: 0.70,
+    By: 4.0,
+    Cy: 1.05,
+    Ey: -1.5,
+    rollingResCoeff: 0.040,
+  },
+  // 7. Wet Grass: Slippery lateral traction
+  grass: {
+    muStatic: 0.42,
+    muKinetic: 0.32,
+    muX: 0.42,
+    muY: 0.36,
+    Bx: 5.8,
+    Cx: 1.25,
+    Ex: 0.80,
+    By: 5.0,
+    Cy: 1.12,
+    Ey: -1.3,
+    rollingResCoeff: 0.050,
+  },
+  // Deep Sand: Moderate grip, heavy loose rolling drag
+  sand: {
+    muStatic: 0.50,
+    muKinetic: 0.40,
+    muX: 0.50,
+    muY: 0.44,
+    Bx: 6.0,
+    Cx: 1.25,
+    Ex: 0.80,
+    By: 5.2,
+    Cy: 1.15,
+    Ey: -1.3,
+    rollingResCoeff: 0.080,
+  },
+  // Snow alias
+  snow: {
+    muStatic: 0.22,
+    muKinetic: 0.15,
+    muX: 0.22,
+    muY: 0.18,
+    Bx: 4.5,
+    Cx: 1.15,
+    Ex: 0.70,
+    By: 4.0,
+    Cy: 1.05,
+    Ey: -1.5,
+    rollingResCoeff: 0.040,
   },
 };
 
@@ -74,8 +167,9 @@ export interface TireEvaluationResult {
   slipAngleRad: number;     // Lateral slip angle alpha (radians)
   slipAngleDeg: number;     // Lateral slip angle alpha (degrees)
   gripUtilization: number;  // Combined friction ellipse usage [0 .. 1.0]
-  rollingResForce: number;  // Rolling resistance opposing wheel (N)
+  rollingResForce: number;  // Dynamic rolling resistance opposing wheel motion: C_rr * N (N)
   aligningTorque: number;   // Self-aligning torque Mz (N*m)
+  muEffective: number;      // Current operational friction coefficient after kinetic transition
 }
 
 export class TireModel {
@@ -84,6 +178,7 @@ export class TireModel {
 
   /**
    * Evaluates tire contact forces given kinematic slip and vertical load.
+   * Includes static-to-kinetic friction transition and dynamic rolling resistance.
    */
   public static evaluate(
     slipRatio: number,
@@ -101,6 +196,7 @@ export class TireModel {
         gripUtilization: 0,
         rollingResForce: 0,
         aligningTorque: 0,
+        muEffective: 0,
       };
     }
 
@@ -110,8 +206,17 @@ export class TireModel {
     const loadRatio = (normalLoadFz - this.NOMINAL_FZ) / this.NOMINAL_FZ;
     const loadFactor = clamp(1.0 - this.LOAD_SENSITIVITY * loadRatio, 0.70, 1.25);
 
-    const peakMuX = coeffs.muX * loadFactor;
-    const peakMuY = coeffs.muY * loadFactor;
+    // Calculate slip magnitude to smoothly blend from peak static grip to sliding kinetic grip.
+    // At low slip (<= 12%), full static peak grip is available.
+    // At high slip (> 32%), grip scales down to kinetic sliding friction, producing authentic
+    // burnout wheelspin, loss of traction on ice/grass, and realistic braking skids.
+    const slipMagnitude = Math.sqrt(slipRatio * slipRatio + Math.sin(slipAngleRad) * Math.sin(slipAngleRad));
+    const slipBlend = clamp((slipMagnitude - 0.12) / 0.20, 0.0, 1.0);
+    const kineticRatio = coeffs.muKinetic / Math.max(0.01, coeffs.muStatic);
+    const kineticFactor = 1.0 - slipBlend * (1.0 - kineticRatio);
+
+    const peakMuX = coeffs.muX * loadFactor * kineticFactor;
+    const peakMuY = coeffs.muY * loadFactor * kineticFactor;
 
     const Dx = peakMuX * normalLoadFz;
     const Dy = peakMuY * normalLoadFz;
@@ -143,7 +248,7 @@ export class TireModel {
       gripUtilization = 1.0;
     }
 
-    // Rolling Resistance Force
+    // Dynamic Rolling Resistance Force: F_rr = C_rr * N
     const rollingResForce = coeffs.rollingResCoeff * normalLoadFz;
 
     // Pneumatic trail aligning torque Mz
@@ -159,6 +264,7 @@ export class TireModel {
       gripUtilization,
       rollingResForce,
       aligningTorque,
+      muEffective: coeffs.muStatic * kineticFactor,
     };
   }
 

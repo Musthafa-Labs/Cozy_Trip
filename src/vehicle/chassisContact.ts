@@ -16,7 +16,7 @@ export interface ChassisContactConfig {
   damping: number;         // Normal damping (N*s/m)
   mu: number;              // Tangential friction coefficient for body/roof (0.6)
   muUnderbody: number;     // Sliding friction coefficient for underbody skid plates (0.28)
-  restitution: number;     // Restitution coefficient on obstacle impact (0.12)
+  restitution: number;     // Restitution coefficient on obstacle impact (0.05)
 }
 
 export class ChassisContactSystem {
@@ -88,7 +88,7 @@ export class ChassisContactSystem {
     this.damping = config.damping ?? 8000;
     this.mu = config.mu ?? 0.60;
     this.muUnderbody = config.muUnderbody ?? 0.28;
-    this.restitution = config.restitution ?? 0.12;
+    this.restitution = Math.min(0.05, config.restitution ?? 0.05);
 
     this.buildLocalHullPoints();
 
@@ -654,7 +654,7 @@ export class ChassisContactSystem {
         const mEffInv = rigidBody.invMass + Math.max(0, angularTerm);
 
         if (vNormal < 0) {
-          const e = Math.abs(vNormal) > 0.4 ? this.restitution : 0.0;
+          const e = Math.abs(vNormal) > 0.4 ? Math.min(this.restitution, 0.05) : 0.0;
           const targetDeltaV = -(1.0 + e) * vNormal;
           const jNormal = Math.max(0, targetDeltaV / (mEffInv * Math.max(1, obsContactCount * 0.4)));
 

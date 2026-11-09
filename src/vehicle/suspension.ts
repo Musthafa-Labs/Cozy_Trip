@@ -17,7 +17,7 @@ export interface WheelMountConfig {
   springStiffness: number;       // N/m (e.g. 26000)
   preloadForce: number;          // N (per-wheel static preload)
   bumpDamping: number;           // N*s/m (compression damping)
-  reboundDamping: number;        // N*s/m (extension damping)
+  reboundDamping: number;        // N*s/m (extension damping: 2.5x to 3.5x bump damping)
 }
 
 export interface WheelRayConfig {
@@ -102,7 +102,7 @@ export class WheelState {
 export interface SuspensionSystemConfig {
   frontArbStiffness?: number; // Front anti-roll bar stiffness (N/m)
   rearArbStiffness?: number;  // Rear anti-roll bar stiffness (N/m)
-  bumpStopThreshold?: number; // Fraction of stroke where bump stop engages (e.g. 0.85 = 85%)
+  bumpStopThreshold?: number; // Fraction of stroke where bump stop engages (e.g. 0.80 = 80%)
   bumpStopStiffness?: number; // Non-linear bump stop stiffness (N/m^2)
   hardStopStiffness?: number; // Hard stop stiffness beyond maxTravel (N/m)
   hardStopDamping?: number;   // Hard stop damping beyond maxTravel (N*s/m)
@@ -152,8 +152,8 @@ export class SuspensionSystem {
     this.bumpStopThreshold = config.bumpStopThreshold ?? 0.80;
     this.bumpStopStiffness = config.bumpStopStiffness ?? 150000;
 
-    this.hardStopStiffness = config.hardStopStiffness ?? 200000; // N/m
-    this.hardStopDamping = config.hardStopDamping ?? 40000;       // N*s/m
+    this.hardStopStiffness = config.hardStopStiffness ?? 220000; // N/m
+    this.hardStopDamping = config.hardStopDamping ?? 50000;       // N*s/m
     this.hardStopMaxForce = config.hardStopMaxForce ?? 45000;    // N
     this.normalSmoothingAlpha = config.normalSmoothingAlpha ?? 0.35;
 
@@ -163,8 +163,8 @@ export class SuspensionSystem {
 
     const springK = 26000;
     const preload = 1295;
-    const bumpC = 3600;
-    const reboundC = 5200;
+    const bumpC = 3600;       // Base compression damping (N*s/m) - compliant for washboards/rocks
+    const reboundC = 10000;   // Base rebound damping (N*s/m) - 2.78x bump damping (within 2.5x - 3.5x)
 
     // Wheel mounts in body space (+X left, -X right, +Z forward, -Z rear):
     const flConfig: WheelMountConfig = {
@@ -223,9 +223,24 @@ export class SuspensionSystem {
     this.wheels = [this.wheelFL, this.wheelFR, this.wheelRL, this.wheelRR];
   }
 
+  public reset(): void {
+    for (const wheel of this.wheels) {
+      wheel.compression = 0;
+      wheel.compressionVelocity = 0;
+      wheel.normalLoad = 0;
+      wheel.grounded = false;
+      wheel.wasGrounded = false;
+      wheel.overTravel = 0;
+      wheel.previousOverTravel = 0;
+      wheel.overTravelVelocity = 0;
+      wheel.previousCompression = 0;
+    }
+  }
+
   /**
-   * Evaluates multi-ray ground contact, spring forces, damping, anti-roll bars,
-   * leading-edge obstacle detection, and normal suspension load.
+   * Evaluates multi-ray ground contact, progressive compression damping,
+   * asymmetric rebound damping, anti-roll bars, obstacle climbing geometry,
+   * and normal suspension forces.
    */
   public update(rigidBody: RigidBody, world: TestGround, dt: number, steerAngles?: number[]): void {
     // 1. Multi-Ray Array contact detection per wheel
@@ -294,7 +309,7 @@ export class SuspensionSystem {
         if (!wheel.wasGrounded) {
           wheel.previousOverTravel = over;
         }
-        wheel.overTravelVelocity = clamp((over - wheel.previousOverTravel) / Math.max(0.0001, dt), -5, 5);
+        wheel.overTravelVelocity = clamp((over - wheel.previousOverTravel) / Math.max(0.0001, dt), -6.5, 6.5);
         wheel.previousOverTravel = over;
         wheel.overTravel = over;
 
@@ -303,9 +318,9 @@ export class SuspensionSystem {
           wheel.previousCompression = wheel.compression;
         }
 
-        // Clamp compressionVelocity to -5 .. +5 m/s to prevent numerical force shock
+        // Clamp compressionVelocity to -6.5 .. +6.5 m/s to prevent numerical force shock and velocity accumulation spikes
         const rawCompVel = (wheel.compression - wheel.previousCompression) / Math.max(0.0001, dt);
-        wheel.compressionVelocity = clamp(rawCompVel, -5.0, 5.0);
+        wheel.compressionVelocity = clamp(rawCompVel, -6.5, 6.5);
         wheel.previousCompression = wheel.compression;
 
         // Compute contact normal from dominant ray geometry
@@ -367,14 +382,48 @@ export class SuspensionSystem {
       const cfg = wheel.config;
 
       // Base spring force: F = K * x + Preload
-      let springForce = cfg.springStiffness * wheel.compression + cfg.preloadForce;
+      const springForce = cfg.springStiffness * wheel.compression + cfg.preloadForce;
 
-      // Damping force: separate bump and rebound damping
+      // Damping force: Progressive bump damping & Asymmetric rebound damping
       let dampingForce = 0;
       if (wheel.compressionVelocity > 0) {
-        dampingForce = cfg.bumpDamping * wheel.compressionVelocity;
+        // Compression stroke:
+        // Progressive Compression Damping: Increase shock damping exponentially during high-velocity
+        // downward suspension compression (|v_suspension| > 1.5 m/s) to absorb impact kinetic energy
+        // before springs reach hard stops.
+        let effectiveBumpDamping = cfg.bumpDamping;
+        if (wheel.compressionVelocity > 1.5) {
+          const excessVel = wheel.compressionVelocity - 1.5;
+          const progressiveMultiplier = Math.exp(Math.min(1.8, excessVel * 0.65));
+          effectiveBumpDamping *= progressiveMultiplier;
+        }
+        dampingForce = effectiveBumpDamping * wheel.compressionVelocity;
       } else {
-        dampingForce = cfg.reboundDamping * wheel.compressionVelocity;
+        // Extension stroke (Rebound):
+        // Asymmetric Rebound Damping (Critical Anti-Bounce Fix):
+        // Set extension rebound damping to 2.5x to 3.5x higher than compression damping
+        // when suspension springs expand back toward rest length after heavy compression.
+        // Rapidly dissipate stored spring strain energy on landing rebound, allowing tires to remain
+        // planted on the road without launching the vehicle back into the air.
+        let effectiveReboundDamping = cfg.reboundDamping;
+        const reboundSpeed = Math.abs(wheel.compressionVelocity);
+
+        // When recovering from heavy compression (>0.20m stroke) or high rebound speed (>0.35 m/s),
+        // apply full 2.5x - 3.5x asymmetric rebound damping (10000 N*s/m).
+        // Under gentle low-speed articulation or static settling near equilibrium (comp < 0.18m, speed < 0.2m/s),
+        // scale damping smoothly to allow clean settling to equilibrium ride height without sluggish creeping.
+        if (wheel.compression < 0.22 && reboundSpeed < 0.35) {
+          const heavyFactor = Math.max(
+            clamp((wheel.compression - 0.18) / 0.06, 0, 1),
+            clamp(reboundSpeed / 0.35, 0, 1)
+          );
+          effectiveReboundDamping = THREE.MathUtils.lerp(4200, cfg.reboundDamping, heavyFactor);
+        } else if (reboundSpeed > 0.8) {
+          const extraDissipation = 1.0 + Math.min(0.4, (reboundSpeed - 0.8) * 0.35);
+          effectiveReboundDamping *= extraDissipation;
+        }
+
+        dampingForce = effectiveReboundDamping * wheel.compressionVelocity;
       }
 
       // Progressive bump stop near full travel stroke
@@ -388,7 +437,8 @@ export class SuspensionSystem {
       // Bottom-out hard stop force
       let hardStopForce = 0;
       if (wheel.overTravel > 0) {
-        hardStopForce = this.hardStopStiffness * wheel.overTravel + this.hardStopDamping * wheel.overTravelVelocity;
+        const effectiveHardStopDamping = Math.max(this.hardStopDamping, 50000);
+        hardStopForce = this.hardStopStiffness * wheel.overTravel + effectiveHardStopDamping * wheel.overTravelVelocity;
         hardStopForce = clamp(hardStopForce, 0, this.hardStopMaxForce);
       } else {
         hardStopForce = 0;

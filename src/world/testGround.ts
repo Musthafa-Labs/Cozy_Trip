@@ -68,7 +68,7 @@ export class TestGround {
     },
   ];
 
-  // Test stations: Cube collision, Ramp Jump, Ditches, Parking Hill, Side Slopes, Washboard, Moguls, Logs, and Articulation
+  // Test stations: Cube collision, Ramp Jump, Ditches, Parking Hill, Side Slopes, Washboard, Moguls, Logs, Articulation, and Surface Pack
   public readonly stations: TestStation[] = [
     {
       id: 'cube_collision_test',
@@ -142,13 +142,21 @@ export class TestGround {
       position: new THREE.Vector3(0, 1.06, 700),
       headingRad: 0,
     },
+    {
+      id: 'surface_pack_test',
+      name: 'Surface Pack & Rolling Resistance Test',
+      zone: 'Zone 9: Surface Pack',
+      description: '7 test strips (Z = 790..950): Asphalt, Dry Dirt, Loose Gravel, Wet Mud, Rock Face, Snow/Ice, Wet Grass, and Sand. Test friction scaling and Crr drag.',
+      position: new THREE.Vector3(0, 1.06, 780),
+      headingRad: 0,
+    },
   ];
 
-  // Road geometry dimensions: 14m wide, extended to Z = 780m (-20m to +780m)
+  // Road geometry dimensions: 14m wide, extended to Z = 970m (-20m to +970m)
   public static readonly ROAD_WIDTH = 14.0;
   public static readonly ROAD_HALF_WIDTH = 7.0;
   public static readonly ROAD_START_Z = -20.0;
-  public static readonly ROAD_END_Z = 780.0;
+  public static readonly ROAD_END_Z = 970.0;
 
   // Pre-configured rock mounds for Zone 8 (Cross-Axle Articulation Course)
   private static readonly ROCKS: ReadonlyArray<{
@@ -179,6 +187,99 @@ export class TestGround {
     { z: 692.0, r: 0.22 }, // Log 4: 0.22m radius
   ];
 
+  // Zone 9 Surface Pack test strips definition (20m strips from Z = 790 to Z = 950)
+  public static readonly SURFACE_STRIPS: ReadonlyArray<{
+    zStart: number;
+    zEnd: number;
+    surface: SurfaceType;
+    name: string;
+    description: string;
+    color: number;
+    roughness: number;
+    metalness: number;
+  }> = [
+    {
+      zStart: 790.0,
+      zEnd: 810.0,
+      surface: 'asphalt',
+      name: '1. ASPHALT',
+      description: 'μs 0.95 • μk 0.85 • Crr 0.015',
+      color: 0x34383c, // Charcoal asphalt
+      roughness: 0.85,
+      metalness: 0.08,
+    },
+    {
+      zStart: 810.0,
+      zEnd: 830.0,
+      surface: 'dirt',
+      name: '2. DRY DIRT',
+      description: 'μs 0.75 • μk 0.65 • Crr 0.035',
+      color: 0x8a6c4b, // Warm dusty dirt
+      roughness: 0.92,
+      metalness: 0.02,
+    },
+    {
+      zStart: 830.0,
+      zEnd: 850.0,
+      surface: 'gravel',
+      name: '3. LOOSE GRAVEL',
+      description: 'μs 0.55 • μk 0.45 • Crr 0.060',
+      color: 0x767879, // Crushed granite gravel
+      roughness: 0.92,
+      metalness: 0.05,
+    },
+    {
+      zStart: 850.0,
+      zEnd: 870.0,
+      surface: 'mud',
+      name: '4. WET MUD',
+      description: 'μs 0.38 • μk 0.28 • Crr 0.120',
+      color: 0x362312, // Dark boggy wet mud
+      roughness: 0.95,
+      metalness: 0.06,
+    },
+    {
+      zStart: 870.0,
+      zEnd: 890.0,
+      surface: 'rock',
+      name: '5. ROCK FACE',
+      description: 'μs 0.88 • μk 0.78 • Crr 0.025',
+      color: 0x585d62, // Slate rock face
+      roughness: 0.78,
+      metalness: 0.10,
+    },
+    {
+      zStart: 890.0,
+      zEnd: 910.0,
+      surface: 'ice',
+      name: '6. SNOW / ICE',
+      description: 'μs 0.22 • μk 0.15 • Crr 0.040',
+      color: 0xdff0f8, // Slick frozen ice pale blue
+      roughness: 0.12,
+      metalness: 0.18,
+    },
+    {
+      zStart: 910.0,
+      zEnd: 930.0,
+      surface: 'grass',
+      name: '7. WET GRASS',
+      description: 'μs 0.42 • μk 0.32 • Crr 0.050',
+      color: 0x386a2e, // Lush wet meadow green
+      roughness: 0.90,
+      metalness: 0.01,
+    },
+    {
+      zStart: 930.0,
+      zEnd: 950.0,
+      surface: 'sand',
+      name: '8. DEEP SAND',
+      description: 'μs 0.50 • μk 0.40 • Crr 0.080',
+      color: 0xd6b37c, // Golden desert sand
+      roughness: 0.96,
+      metalness: 0.01,
+    },
+  ];
+
   constructor() {
     this.mesh = new THREE.Group();
     this.buildScene();
@@ -187,54 +288,7 @@ export class TestGround {
   /**
    * Smooth analytic terrain height function using smoothstep transitions only.
    * Zero vertical faces; C1 continuity everywhere.
-   *
-   * ZONE 1 (Ramp Jump):
-   * - Full effect for |x| <= 4m, blending to 0 over the next 1m (|x| = 4..5m)
-   * - Approach ramp: rises 0.6m, smoothstep over z = 150..162
-   * - Launch ramp: rises a further 1.0m, smoothstep over z = 162..168 (height 1.6m at z = 168)
-   * - Lip fall-away: height falls back to 0 with smoothstep over z = 168..169.5
-   * - Flat road afterward (the landing area)
-   *
-   * ZONE 2 (Ditches):
-   * - Full effect for |x| <= 7m, blending to 0 over 1m (|x| = 7..8m)
-   * - Shallow trench: 0.2m deep between z = 300..304, smoothstep edges 1.2m (z = 298.8..305.2)
-   * - Medium trench: 0.35m deep between z = 320..326, smoothstep edges 1.6m (z = 318.4..327.6)
-   * - Two step-downs: -0.3m smoothstep over z = 340..341 and further -0.3m over z = 350..351,
-   *   then smooth recovery back to 0 with smoothstep over z = 365..369
-   * - Drop-off: -1.0m with smoothstep over z = 380..381.5,
-   *   then smooth ramp back up to 0 with smoothstep over z = 392..400
-   *
-   * ZONE 3 (Parking Hill):
-   * - Full effect for |x| <= 6m, blending to 0 over 1m (|x| = 6..7m)
-   * - Approach apron: flat at z = 410..420
-   * - 20° incline: rises to 3.64m over z = 420..430 with smoothstep entry (420..422) and exit (428..430)
-   * - Plateau: holds constant height of 3.64m over z = 430..445
-   * - Descent ramp: smoothstep back to 0m over z = 445..455
-   *
-   * ZONE 4 (Side Slopes):
-   * - 15° side slope (z = 465..485): rises linearly by +0.268 m/m for x in [1, 6], smoothstep entry/exit along Z
-   * - 25° side slope (z = 495..515): rises linearly by +0.466 m/m for x in [1, 6], smoothstep entry/exit along Z
-   *
-   * ZONE 5 (Washboard Bumps):
-   * - Washboard track (z = 540..580): regular sinusoidal corrugated ripples with wavelength 1.2m and amplitude 0.06m
-   * - Smoothstep entry (z = 540..543) and exit (z = 577..580) envelope blending
-   * - Full effect for |x| <= 6m, blending to 0 over 1m (|x| = 6..7m)
-   *
-   * ZONE 6 (Moguls & Staggered Mounds):
-   * - Mogul field (z = 590..640): staggered left/right mounds using 2D sine math: z-wavelength 4.0m,
-   *   x-phase shift of 180° between left (x < 0) and right (x > 0) tracks, peak amplitude +0.15m
-   * - Smoothstep entry (z = 590..594) and exit (z = 636..640) envelope blending
-   * - Full effect for |x| <= 6m, blending to 0 over 1m (|x| = 6..7m)
-   *
-   * ZONE 7 (Log Obstacles):
-   * - Log crawl track (z = 660..700): 4 fallen logs lying transversely across track at z = 668, 676, 684, 692
-   * - Semi-cylindrical ridges of radius 0.19m - 0.24m with smoothstep base contact
-   * - Full effect for |x| <= 6m, blending to 0 over 1m (|x| = 6..7m)
-   *
-   * ZONE 8 (Rock Boulder Articulation Course):
-   * - Asymmetrical 3D rock mounds (z = 710..760): varying heights 0.22m - 0.34m, radii 1.3m - 1.8m
-   * - Staggered diagonally across left and right tracks to test maximum cross-axle articulation
-   * - Full effect for |x| <= 6m, blending to 0 over 1m (|x| = 6..7m)
+   * Zones 1-8 up to Z=762; flat highway strips from Z=780 to Z=970 for clean friction/Crr tests.
    */
   public terrainHeight(x: number, z: number): number {
     const absX = Math.abs(x);
@@ -267,7 +321,6 @@ export class TestGround {
       let rawH = 0.0;
 
       if (z <= 305.2) {
-        // Shallow trench: 0.2m deep between z = 300..304, smoothstep edges 1.2m
         if (z < 300.0) {
           rawH = -0.2 * smoothstep(298.8, 300.0, z);
         } else if (z <= 304.0) {
@@ -276,7 +329,6 @@ export class TestGround {
           rawH = -0.2 * (1.0 - smoothstep(304.0, 305.2, z));
         }
       } else if (z >= 318.4 && z <= 327.6) {
-        // Medium trench: 0.35m deep between z = 320..326, smoothstep edges 1.6m
         if (z < 320.0) {
           rawH = -0.35 * smoothstep(318.4, 320.0, z);
         } else if (z <= 326.0) {
@@ -285,8 +337,6 @@ export class TestGround {
           rawH = -0.35 * (1.0 - smoothstep(326.0, 327.6, z));
         }
       } else if (z >= 340.0 && z <= 369.0) {
-        // Two step-downs: -0.3m smoothstep over z = 340..341 and further -0.3m over z = 350..351,
-        // then smooth recovery back to 0 with smoothstep over z = 365..369
         if (z < 341.0) {
           rawH = -0.3 * smoothstep(340.0, 341.0, z);
         } else if (z < 350.0) {
@@ -299,8 +349,6 @@ export class TestGround {
           rawH = -0.6 * (1.0 - smoothstep(365.0, 369.0, z));
         }
       } else if (z >= 380.0 && z <= 400.0) {
-        // Drop-off: -1.0m with smoothstep over z = 380..381.5,
-        // then smooth ramp back up to 0 with smoothstep over z = 392..400
         if (z < 381.5) {
           rawH = -1.0 * smoothstep(380.0, 381.5, z);
         } else if (z < 392.0) {
@@ -318,7 +366,6 @@ export class TestGround {
     if (absX < 7.0 && z >= 420.0 && z <= 455.0) {
       let rawH = 0.0;
       if (z < 430.0) {
-        // 20-Degree Incline: rises to 3.64m over z = 420..430 with smoothstep entry (420..422) and exit (428..430)
         const m = 3.64 / 8.0; // 0.455 m/m
         if (z < 422.0) {
           const u = (z - 420.0) / 2.0;
@@ -330,10 +377,8 @@ export class TestGround {
           rawH = 7.0 * m + 2.0 * m * (u - (u * u * u - 0.5 * u * u * u * u));
         }
       } else if (z <= 445.0) {
-        // Plateau: holds constant height of 3.64m over z = 430..445
         rawH = 3.64;
       } else {
-        // Descent ramp: smoothstep back to 0m over z = 445..455
         rawH = 3.64 * (1.0 - smoothstep(445.0, 455.0, z));
       }
 
@@ -347,7 +392,6 @@ export class TestGround {
       let zBlend = 0.0;
 
       if (z <= 485.0) {
-        // 15-Degree Side Slope (15° roll angle, slope = 0.268 m/m)
         slope = 0.268;
         if (z < 467.0) {
           zBlend = smoothstep(465.0, 467.0, z);
@@ -357,7 +401,6 @@ export class TestGround {
           zBlend = 1.0 - smoothstep(483.0, 485.0, z);
         }
       } else {
-        // 25-Degree Side Slope (25° roll angle, slope = 0.466 m/m)
         slope = 0.466;
         if (z < 497.0) {
           zBlend = smoothstep(495.0, 497.0, z);
@@ -368,11 +411,6 @@ export class TestGround {
         }
       }
 
-      // Lateral banking profile across X:
-      // x in [0, 1]: smoothstep transition into bank
-      // x in [1, 6]: strictly linear slope (+0.268 or +0.466 m/m)
-      // x in [6, 7]: smoothstep transition leveling off at road edge
-      // x in [7, 8]: smoothstep blend down to 0 on dirt shoulder
       let rawLatH = 0.0;
       if (x < 1.0) {
         rawLatH = slope * (x * x * x - 0.5 * x * x * x * x);
@@ -416,7 +454,6 @@ export class TestGround {
         zEnvelope = 1.0 - smoothstep(636.0, 640.0, z);
       }
 
-      // 2D sine math: z-wavelength 4.0m, x-phase shift of 180° between left (x < 0) and right (x > 0) tracks
       const clampedX = Math.max(-6.0, Math.min(6.0, x));
       const xWave = Math.sin((Math.PI * clampedX) / 6.0);
       const zWave = Math.sin((2.0 * Math.PI * (z - 590.0)) / 4.0);
@@ -433,9 +470,7 @@ export class TestGround {
         const log = TestGround.LOGS[i];
         const dz = Math.abs(z - log.z);
         if (dz < log.r) {
-          const u = dz / log.r; // 0 at log top, 1 at ground contact
-          // Semi-cylinder with smooth C1 base contact: sqrt(1 - u^2) * (1 - u^6)
-          // Preserves cylindrical crest for wheel contact while smoothly blending to 0 slope at base
+          const u = dz / log.r;
           const u2 = u * u;
           const u6 = u2 * u2 * u2;
           const logProfile = log.r * Math.sqrt(Math.max(0, 1.0 - u2)) * (1.0 - u6);
@@ -458,7 +493,6 @@ export class TestGround {
         const dz = (z - rock.z) / rock.rz;
         const distSq = dx * dx + dz * dz;
         if (distSq < 1.0) {
-          // Smooth 3D dome: h * (1 - distSq)^2 ensures C1 smoothness and 0 slope at edge
           const moundH = rock.h * (1.0 - distSq) * (1.0 - distSq);
           if (moundH > rawRockH) {
             rawRockH = moundH;
@@ -476,13 +510,13 @@ export class TestGround {
   /**
    * Fast, exact analytical ground query for road and terrain.
    * Central differences (epsilon = 0.05m) computes outward normal into preallocated scratch vector.
-   * Surface is 'asphalt' for |x| <= 7 within road Z bounds, and 'dirt' beyond.
+   * Accurately determines local SurfaceType across all road zones and Zone 9 surface strips.
    */
   public getHeightNormalSurface(x: number, z: number): GroundQuery {
     const hCenter = this.terrainHeight(x, z);
-
-    // If completely outside feature areas, ground is perfectly level (0, 1, 0)
     const absX = Math.abs(x);
+
+    // If completely outside obstacle areas or in flat Zone 9, normal is perfectly level (0, 1, 0)
     if (
       absX >= 8.1 ||
       (z < 149.0 && z > -25.0) ||
@@ -516,8 +550,40 @@ export class TestGround {
       z >= TestGround.ROAD_START_Z &&
       z <= TestGround.ROAD_END_Z;
 
+    let surface: SurfaceType = 'dirt';
+
+    if (onRoad) {
+      if (z >= 790.0 && z <= 950.0) {
+        // ZONE 9: Surface Pack Test Strips (790..950m)
+        if (z < 810.0) {
+          surface = 'asphalt'; // Strip 1: Asphalt
+        } else if (z < 830.0) {
+          surface = 'dirt';    // Strip 2: Dry Dirt
+        } else if (z < 850.0) {
+          surface = 'gravel';  // Strip 3: Loose Gravel
+        } else if (z < 870.0) {
+          surface = 'mud';     // Strip 4: Wet Mud
+        } else if (z < 890.0) {
+          surface = 'rock';    // Strip 5: Rock Face
+        } else if (z < 910.0) {
+          surface = 'ice';     // Strip 6: Snow / Ice
+        } else if (z < 930.0) {
+          surface = 'grass';   // Strip 7: Wet Grass
+        } else {
+          surface = 'sand';    // Strip 8: Deep Sand
+        }
+      } else if (z >= 710.0 && z <= 762.0 && hCenter > 0.05) {
+        // Climbing directly on rock mound in Zone 8
+        surface = 'rock';
+      } else {
+        surface = 'asphalt';
+      }
+    } else {
+      surface = 'dirt';
+    }
+
     this.queryResult.height = hCenter;
-    this.queryResult.surface = onRoad ? 'asphalt' : 'dirt';
+    this.queryResult.surface = surface;
     return this.queryResult;
   }
 
@@ -531,12 +597,10 @@ export class TestGround {
   ): boolean {
     const obs = this.staticObstacles[0];
 
-    // Distance to obstacle center
     const dx = worldPoint.x - obs.center.x;
     const dy = worldPoint.y - obs.center.y;
     const dz = worldPoint.z - obs.center.z;
 
-    // Check against box bounds (with rotation if any)
     const cosY = Math.cos(-obs.yawRad);
     const sinY = Math.sin(-obs.yawRad);
     const localX = cosY * dx - sinY * dz;
@@ -547,9 +611,7 @@ export class TestGround {
     const distY = obs.halfExtents.y - Math.abs(localY);
     const distZ = obs.halfExtents.z - Math.abs(localZ);
 
-    // If point is strictly inside the 3D cube volume
     if (distX > 0 && distY > 0 && distZ > 0) {
-      // Find the closest face (smallest penetration distance)
       let minPen = distX;
       let localNormX = Math.sign(localX);
       let localNormY = 0;
@@ -569,7 +631,6 @@ export class TestGround {
         localNormZ = 0;
       }
 
-      // Transform outward local normal back to world space
       const cosYaw = Math.cos(obs.yawRad);
       const sinYaw = Math.sin(obs.yawRad);
       const worldNormX = cosYaw * localNormX - sinYaw * localNormZ;
@@ -586,25 +647,23 @@ export class TestGround {
   }
 
   /**
-   * Constructs visual meshes:
-   * 1. Road mesh evaluated directly from terrainHeight(x, z) at ~0.20m-0.5m grid spacing up to Z = 780m
-   * 2. Edge markings and dashed center line following the 3D terrain profile (+0.003m offset)
-   * 3. Surrounding ground mesh following terrain shoulders and blending to level ground (-0.015m offset)
-   * 4. Roadside orientation signs at X = 9m for all test zones
-   * 5. Solid 1.2m cube at (0, 0.6, 65)
+   * Constructs visual scene:
+   * 1. Road mesh evaluated directly from terrainHeight(x, z) up to Z = 790m
+   * 2. ZONE 9: 7 distinct 20m surface test strips with custom materials & colors (Z = 790..950m)
+   * 3. Road runoff (Z = 950..970m)
+   * 4. Transverse demarcation lines & continuous edge/center lane markings
+   * 5. Surrounding terrain shoulders extended to Z = 970m
+   * 6. Roadside orientation signs at X = 9m for all zones (including Zone 9 & each surface strip)
+   * 7. Solid 1.2m cube at (0, 0.6, 65)
    */
   private buildScene(): void {
-    // =========================================================================
-    // 1. Grid Definition along X and Z
-    // =========================================================================
-    // Road X coordinates: 29 points spanning -7.0m to +7.0m (0.5m spacing)
-    // Ensures exact placement at key lateral blend boundaries: -7, -6, -5, -4, 0, 1, 4, 5, 6, 7
+    // Road X coordinates: 29 points spanning -7.0m to +7.0m
     const roadXCoords: number[] = [];
     for (let i = 0; i <= 28; i++) {
       roadXCoords.push(-TestGround.ROAD_HALF_WIDTH + (i / 28) * TestGround.ROAD_WIDTH);
     }
 
-    // Road Z coordinates: dense longitudinal resolution across all active zones
+    // Road Z coordinates for main section (Z = -20 to 790)
     const zCoords: number[] = [];
     for (let z = -20.0; z < 140.0; z += 2.0) zCoords.push(z);
     for (let z = 140.0; z < 175.0; z += 0.25) zCoords.push(z); // Zone 1 ramp jump
@@ -614,21 +673,21 @@ export class TestGround {
     for (let z = 415.0; z < 460.0; z += 0.25) zCoords.push(z); // Zone 3 parking hill
     for (let z = 460.0; z < 520.0; z += 0.25) zCoords.push(z); // Zone 4 side slopes
     for (let z = 520.0; z < 538.0; z += 2.0) zCoords.push(z); // Flat transition
-    for (let z = 538.0; z < 582.0; z += 0.20) zCoords.push(z); // Zone 5 washboard bumps (0.20m resolution for 1.2m wave)
+    for (let z = 538.0; z < 582.0; z += 0.20) zCoords.push(z); // Zone 5 washboard bumps
     for (let z = 582.0; z < 588.0; z += 2.0) zCoords.push(z); // Flat transition
-    for (let z = 588.0; z < 642.0; z += 0.25) zCoords.push(z); // Zone 6 moguls field (0.25m resolution for 4m wave)
+    for (let z = 588.0; z < 642.0; z += 0.25) zCoords.push(z); // Zone 6 moguls field
     for (let z = 642.0; z < 658.0; z += 2.0) zCoords.push(z); // Transition
-    for (let z = 658.0; z < 702.0; z += 0.20) zCoords.push(z); // Zone 7 log obstacles (0.20m resolution for ~0.4m logs)
+    for (let z = 658.0; z < 702.0; z += 0.20) zCoords.push(z); // Zone 7 log obstacles
     for (let z = 702.0; z < 708.0; z += 2.0) zCoords.push(z); // Transition
-    for (let z = 708.0; z < 765.0; z += 0.25) zCoords.push(z); // Zone 8 rock articulation course (0.25m resolution)
-    for (let z = 765.0; z <= 780.0; z += 2.0) zCoords.push(z); // Extended flat end
-    if (zCoords[zCoords.length - 1] < 780.0) zCoords.push(780.0);
+    for (let z = 708.0; z < 765.0; z += 0.25) zCoords.push(z); // Zone 8 rock articulation course
+    for (let z = 765.0; z <= 790.0; z += 2.0) zCoords.push(z); // Approach to Zone 9
+    if (zCoords[zCoords.length - 1] < 790.0) zCoords.push(790.0);
 
     const nx = roadXCoords.length;
     const nz = zCoords.length;
 
     // =========================================================================
-    // 2. Road Surface Mesh (Asphalt)
+    // 1. Main Road Surface Mesh (Asphalt Z = -20 to 790)
     // =========================================================================
     const roadPositions: number[] = [];
     const roadUvs: number[] = [];
@@ -636,7 +695,7 @@ export class TestGround {
 
     for (let j = 0; j < nz; j++) {
       const z = zCoords[j];
-      const v = (z - TestGround.ROAD_START_Z) / (TestGround.ROAD_END_Z - TestGround.ROAD_START_Z);
+      const v = (z - TestGround.ROAD_START_Z) / (790.0 - TestGround.ROAD_START_Z);
       for (let i = 0; i < nx; i++) {
         const x = roadXCoords[i];
         const y = this.terrainHeight(x, z);
@@ -673,23 +732,80 @@ export class TestGround {
     this.mesh.add(roadMesh);
 
     // =========================================================================
-    // 3. Lane Markings (White Edge Lines & Center Dashed Line)
+    // 2. ZONE 9: Surface Pack Test Strips (Z = 790 to 950m + 950..970 Runoff)
+    // =========================================================================
+    for (let s = 0; s < TestGround.SURFACE_STRIPS.length; s++) {
+      const strip = TestGround.SURFACE_STRIPS[s];
+      const stripGeom = new THREE.PlaneGeometry(TestGround.ROAD_WIDTH, strip.zEnd - strip.zStart, 20, 20);
+      stripGeom.rotateX(-Math.PI / 2);
+
+      const stripMat = new THREE.MeshStandardMaterial({
+        color: strip.color,
+        roughness: strip.roughness,
+        metalness: strip.metalness,
+      });
+
+      const stripMesh = new THREE.Mesh(stripGeom, stripMat);
+      stripMesh.position.set(0, 0.0, (strip.zStart + strip.zEnd) * 0.5);
+      stripMesh.receiveShadow = true;
+      this.mesh.add(stripMesh);
+
+      // Roadside marker sign for each strip
+      this.createRoadsideSign(strip.name, strip.description, 9.0, (strip.zStart + strip.zEnd) * 0.5);
+
+      // Transverse boundary warning stripe line at start of strip
+      const boundaryGeom = new THREE.PlaneGeometry(TestGround.ROAD_WIDTH, 0.4);
+      boundaryGeom.rotateX(-Math.PI / 2);
+      const boundaryMat = new THREE.MeshStandardMaterial({
+        color: 0xf59e0b, // Amber border
+        roughness: 0.5,
+      });
+      const boundaryMesh = new THREE.Mesh(boundaryGeom, boundaryMat);
+      boundaryMesh.position.set(0, 0.004, strip.zStart);
+      this.mesh.add(boundaryMesh);
+    }
+
+    // Runoff Strip (Z = 950..970m)
+    const runoffGeom = new THREE.PlaneGeometry(TestGround.ROAD_WIDTH, 20.0, 10, 10);
+    runoffGeom.rotateX(-Math.PI / 2);
+    const runoffMesh = new THREE.Mesh(runoffGeom, roadMat);
+    runoffMesh.position.set(0, 0.0, 960.0);
+    runoffMesh.receiveShadow = true;
+    this.mesh.add(runoffMesh);
+
+    // Final boundary line at Z = 950
+    const finalBoundaryGeom = new THREE.PlaneGeometry(TestGround.ROAD_WIDTH, 0.4);
+    finalBoundaryGeom.rotateX(-Math.PI / 2);
+    const finalBoundaryMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.5 });
+    const finalBoundaryMesh = new THREE.Mesh(finalBoundaryGeom, finalBoundaryMat);
+    finalBoundaryMesh.position.set(0, 0.004, 950.0);
+    this.mesh.add(finalBoundaryMesh);
+
+    // =========================================================================
+    // 3. Lane Markings (White Edge Lines & Center Dashed Line to Z = 970m)
     // =========================================================================
     const linePositions: number[] = [];
     const lineIndices: number[] = [];
     let lineVertOffset = 0;
 
+    // Full dense Z list extending to Z = 970m
+    const allZCoords = [...zCoords];
+    for (let z = 792.0; z <= TestGround.ROAD_END_Z; z += 2.0) {
+      allZCoords.push(z);
+    }
+    const totalNz = allZCoords.length;
+
     const addQuadStrip = (xLeft: number, xRight: number) => {
       const startIdx = lineVertOffset;
-      for (let j = 0; j < nz; j++) {
-        const z = zCoords[j];
+      for (let j = 0; j < totalNz; j++) {
+        const z = allZCoords[j];
         const yL = this.terrainHeight(xLeft, z) + 0.003;
         const yR = this.terrainHeight(xRight, z) + 0.003;
         linePositions.push(xLeft, yL, z);
         linePositions.push(xRight, yR, z);
         lineVertOffset += 2;
       }
-      for (let j = 0; j < nz - 1; j++) {
+      for (let j = 0; j < totalNz - 1; j++) {
         const a = startIdx + j * 2;
         const b = a + 1;
         const c = startIdx + (j + 1) * 2;
@@ -748,9 +864,8 @@ export class TestGround {
     this.mesh.add(lineMesh);
 
     // =========================================================================
-    // 4. Surrounding Ground (Terrain Shoulders & Flat Plain)
+    // 4. Surrounding Ground (Terrain Shoulders & Flat Plain to Z = 970m)
     // =========================================================================
-    // Left & right ground strips conform to slopes and blend smoothly to ground level (-0.015m)
     const groundLeftX = [-120.0, -50.0, -20.0, -11.0, -8.5, -7.0];
     const groundRightX = [7.0, 8.5, 11.0, 20.0, 50.0, 120.0];
 
@@ -759,8 +874,8 @@ export class TestGround {
       const gIndices: number[] = [];
       const gxCount = xArray.length;
 
-      for (let j = 0; j < nz; j++) {
-        const z = zCoords[j];
+      for (let j = 0; j < totalNz; j++) {
+        const z = allZCoords[j];
         for (let i = 0; i < gxCount; i++) {
           const x = xArray[i];
           const y = this.terrainHeight(x, z) - 0.015;
@@ -768,7 +883,7 @@ export class TestGround {
         }
       }
 
-      for (let j = 0; j < nz - 1; j++) {
+      for (let j = 0; j < totalNz - 1; j++) {
         for (let i = 0; i < gxCount - 1; i++) {
           const a = j * gxCount + i;
           const b = a + 1;
@@ -797,7 +912,7 @@ export class TestGround {
     buildGroundSide(groundLeftX);
     buildGroundSide(groundRightX);
 
-    // Front and back ground caps extending beyond road start/end
+    // Front and back ground caps
     const groundCapMat = new THREE.MeshStandardMaterial({
       color: 0xc4beaf,
       roughness: 0.95,
@@ -814,12 +929,12 @@ export class TestGround {
     const backCapGeom = new THREE.PlaneGeometry(240, 80, 1, 1);
     backCapGeom.rotateX(-Math.PI / 2);
     const backCapMesh = new THREE.Mesh(backCapGeom, groundCapMat);
-    backCapMesh.position.set(0, -0.015, 820.0);
+    backCapMesh.position.set(0, -0.015, 1010.0);
     backCapMesh.receiveShadow = true;
     this.mesh.add(backCapMesh);
 
     // =========================================================================
-    // 5. Exactly One Solid 1.2m Cube at (0, 0.6, 65)
+    // 5. Solid 1.2m Cube at (0, 0.6, 65)
     // =========================================================================
     const obs = this.staticObstacles[0];
     const cubeGeom = new THREE.BoxGeometry(
@@ -828,7 +943,7 @@ export class TestGround {
       obs.halfExtents.z * 2
     );
     const cubeMat = new THREE.MeshStandardMaterial({
-      color: 0x7a7e85, // Plain neutral concrete grey
+      color: 0x7a7e85, // Neutral concrete grey
       roughness: 0.8,
       metalness: 0.1,
     });
@@ -839,7 +954,7 @@ export class TestGround {
     this.mesh.add(cubeMesh);
 
     // =========================================================================
-    // 6. Orientation Sign Boards beside the road at X = 9m
+    // 6. Zone Entry Orientation Signs beside road at X = 9m
     // =========================================================================
     this.createRoadsideSign('RAMP JUMP', 'LAUNCH 1.6m @ 30-70 km/h', 9.0, 140.0);
     this.createRoadsideSign('DITCHES', 'TRENCHES & 1m DROP', 9.0, 290.0);
@@ -849,6 +964,7 @@ export class TestGround {
     this.createRoadsideSign('MOGULS ZONE', 'CROSS-AXLE ARTICULATION (4m / 15cm)', 9.0, 585.0);
     this.createRoadsideSign('LOG OBSTACLES', 'TREE TRUNK CRAWL (Ø 0.4-0.5m)', 9.0, 655.0);
     this.createRoadsideSign('ROCK ARTICULATION', 'CROSS-AXLE ARTICULATION (0.15-0.35m)', 9.0, 705.0);
+    this.createRoadsideSign('SURFACE PACK', 'ZONE 9: 7 SURFACE STRIPS', 9.0, 785.0);
   }
 
   /**
@@ -883,27 +999,22 @@ export class TestGround {
       canvas.height = 256;
       const ctx = canvas.getContext('2d');
       if (ctx) {
-        // Background
         ctx.fillStyle = '#1c2024';
         ctx.fillRect(0, 0, 512, 256);
 
-        // Yellow border
         ctx.strokeStyle = '#f59e0b';
         ctx.lineWidth = 14;
         ctx.strokeRect(7, 7, 498, 242);
 
-        // Warning chevron badge
         ctx.fillStyle = '#f59e0b';
         ctx.font = 'bold 26px sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText('TEST ZONE', 256, 55);
 
-        // Main title
         ctx.fillStyle = '#ffffff';
-        ctx.font = '900 48px sans-serif';
+        ctx.font = '900 46px sans-serif';
         ctx.fillText(title, 256, 128);
 
-        // Subtitle
         ctx.fillStyle = '#cbd5e1';
         ctx.font = '600 24px sans-serif';
         ctx.fillText(subtitle, 256, 195);
@@ -928,22 +1039,20 @@ export class TestGround {
     });
 
     const boardMaterials = [
-      backMat, // right
-      backMat, // left
-      backMat, // top
-      backMat, // bottom
-      faceMat, // front (+Z)
-      backMat, // back (-Z)
+      backMat,
+      backMat,
+      backMat,
+      backMat,
+      faceMat,
+      backMat,
     ];
 
     const boardMesh = new THREE.Mesh(boardGeom, boardMaterials);
     boardMesh.position.set(0, 1.8, 0);
     boardMesh.castShadow = true;
-    // Rotate slightly inward toward road for clear visibility
     boardMesh.rotation.y = -Math.PI / 10;
     signGroup.add(boardMesh);
 
     this.mesh.add(signGroup);
   }
 }
-
